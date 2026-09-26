@@ -18,3 +18,15 @@ Status: early development — see the roadmap below.
 ## License
 
 AGPL-3.0-or-later — see [LICENSE](LICENSE).
+
+## Quick start (anonymous search — no account needed)
+
+```sh
+uv tool install 'cddpt[cli,files]'   # or: pip install 'cddpt[cli,files]'
+
+cddpt collections list
+cddpt search --aoi my_area.geojson --collection MDT-2m --estimate-only
+cddpt search --bbox -9.15,38.70,-9.13,38.72 --collection LAZ --output tiles.geojson
+```
+
+Downloading (which requires a free CDD account) is not implemented yet — see the roadmap.

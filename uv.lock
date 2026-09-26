@@ -166,7 +166,7 @@ files = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "cddpt", extra = ["files"] },
+    { name = "cddpt", extra = ["cli", "files"] },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -202,6 +202,7 @@ provides-extras = ["files", "cli"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "cddpt", extras = ["cli"] },
     { name = "cddpt", extras = ["files"] },
     { name = "mypy", specifier = ">=1.10" },
     { name = "pytest", specifier = ">=8.0" },

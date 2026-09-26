@@ -70,11 +70,18 @@ dev = [
     # numpy stub version whose PEP 695 `type` aliases are incompatible with
     # this project's mypy `python_version = "3.10"` target.
     "cddpt[files]",
+    # Milestone 3's tests (tests/test_cli.py) exercise the CLI directly via
+    # typer.testing.CliRunner, which needs the optional cddpt[cli] extra
+    # installed.
+    "cddpt[cli]",
 ]
 
 [project.urls]
 Homepage = "https://github.com/dokterbob/cddpt"
 Repository = "https://github.com/dokterbob/cddpt"
+
+[project.scripts]
+cddpt = "cddpt.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cddpt"]
