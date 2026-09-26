@@ -3,16 +3,18 @@
 Not affiliated with, endorsed by, or supported by Direção-Geral do
 Território.
 
-This milestone (Milestone 1) provides only the package skeleton and the
-HTTP/TLS foundation: configuration (:class:`~cddpt.settings.Settings`), the
-error hierarchy, the governed HTTP session factory, and the shared
-rate-limiter/circuit-breaker. Search, download, auth and the CLI land in
-later milestones.
+Milestone 1 provided the package skeleton and HTTP/TLS foundation.
+Milestone 2 adds fully anonymous catalog browsing, AOI handling and search:
+:class:`~cddpt.aoi.Aoi` and :class:`~cddpt.catalog.CddCatalog`. Auth,
+downloading and the CLI land in later milestones (``Downloader`` is not
+exported yet).
 """
 
 from __future__ import annotations
 
 from ._version import __version__
+from .aoi import Aoi
+from .catalog import CddCatalog
 from .settings import Settings
 
-__all__ = ["Settings", "__version__"]
+__all__ = ["Aoi", "CddCatalog", "Settings", "__version__"]

@@ -1,0 +1,67 @@
+interactions:
+- request:
+    body: null
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      User-Agent:
+      - cddpt/0.0.1 (+https://pypi.org/project/cddpt/)
+    method: GET
+    uri: https://cdd.dgterritorio.gov.pt/dgt-be/v1/collections/MDT-2m
+  response:
+    body:
+      string: "{\"status\":200,\"message\":\"OK\",\"data\":{\"id\":\"MDT-2m\",\"name\"\
+        :\"MDT-2m\",\"type\":\"Collection\",\"links\":[{\"rel\":\"items\",\"type\"\
+        :\"application/geo+json\",\"href\":\"https://dgt-be.a.incd.pt:8081/collections/MDT-2m/items\"\
+        },{\"rel\":\"parent\",\"type\":\"application/json\",\"href\":\"https://dgt-be.a.incd.pt:8081/\"\
+        },{\"rel\":\"root\",\"type\":\"application/json\",\"href\":\"https://dgt-be.a.incd.pt:8081/\"\
+        },{\"rel\":\"self\",\"type\":\"application/json\",\"href\":\"https://dgt-be.a.incd.pt:8081/collections/MDT-2m\"\
+        },{\"rel\":\"items\",\"href\":\"https://dgt-be.a.incd.pt:8081/collections/MDT-2m/items\"\
+        ,\"type\":\"application/geo+json\"},{\"rel\":\"items\",\"href\":\"https://dgt-be.a.incd.pt:8081/collections/MDT-2m/items\"\
+        ,\"type\":\"application/geo+json\"},{\"rel\":\"http://www.opengis.net/def/rel/ogc/1.0/queryables\"\
+        ,\"href\":\"https://dgt-be.a.incd.pt:8081/collections/MDT-2m/queryables\"\
+        ,\"type\":\"application/schema+json\",\"title\":\"Queryables\"},{\"rel\":\"\
+        http://www.opengis.net/def/rel/ogc/1.0/queryables\",\"type\":\"application/schema+json\"\
+        ,\"title\":\"Queryables\",\"href\":\"https://dgt-be.a.incd.pt:8081/collections/MDT-2m/queryables\"\
+        }],\"title\":\"LiDAR \u2013 Modelos Digitais do Terreno - resolu\xE7\xE3o\
+        \ 2 m\",\"extent\":{\"spatial\":{\"bbox\":[[-9.84375,36.5626,-5.866699,42.334184]]},\"\
+        temporal\":{\"interval\":[[\"2024-09-19T00:00:00.000000Z\",\"2024-09-19T23:59:59.000000Z\"\
+        ]]}},\"license\":\"proprietary\",\"keywords\":[\"LiDAR - Modelos Digitais\
+        \ do Relevo\",\"Modelos Digitais de terreno\",\"MDT-2m\",\"Lidar\"],\"providers\"\
+        :[{\"url\":\"https://www.dgterritorio.gov.pt/\",\"name\":\"Direc\xE7\xE3o\
+        \ Geral do Territ\xF3rio\",\"roles\":[\"producer\",\"licensor\"]}],\"summaries\"\
+        :{\"access\":[\"private\"],\"location\":[\"continente\"],\"visibility\":[\"\
+        show\"]},\"description\":\"Modelos Digitais do Terreno do territ\xF3rio de\
+        \ Portugal continental  com uma resolu\xE7\xE3o espacial de 2 m e derivados\
+        \ de uma nuvem de pontos LiDAR com uma densidade m\xE9dia de 10 pontos/m2.\
+        \ Modelo altim\xE9trico em formato matricial que representa digitalmente o\
+        \ solo, n\xE3o sendo consideradas as edifica\xE7\xF5es, a vegeta\xE7\xE3o\
+        \ e outras estruturas artificiais existentes acima do terreno. Zona Noroeste\
+        \ ainda indispon\xEDvel.\",\"stac_version\":\"1.0.0\"}}"
+    headers:
+      Access-Control-Allow-Credentials:
+      - 'true'
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '2071'
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Sat, 26 Sep 2026 13:34:32 GMT
+      ETag:
+      - W/"817-7YsQ299xyTFFN6NI+w+F5HBXiuI"
+      Server:
+      - nginx/1.31.4
+      Vary:
+      - Origin
+      X-Powered-By:
+      - Express
+    status:
+      code: 200
+      message: OK
+version: 1

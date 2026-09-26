@@ -1,0 +1,186 @@
+interactions:
+- request:
+    body: '{"limit": 10, "collections": ["MDT-2m"], "intersects": {"type": "Polygon",
+      "coordinates": [[[-9.126349614063367, 38.70334521584983], [-9.13209740894674,
+      38.70334513247748], [-9.13209740894674, 38.70747642257685], [-9.12640677428321,
+      38.707476506513835], [-9.126349614063367, 38.70334521584983]]]}}'
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '297'
+      Content-Type:
+      - application/json
+      User-Agent:
+      - cddpt/0.0.1 (+https://pypi.org/project/cddpt/)
+    method: POST
+    uri: https://cdd.dgterritorio.gov.pt/dgt-be/v1/search
+  response:
+    body:
+      string: '{"type":"FeatureCollection","context":{"limit":10,"returned":1},"features":[{"id":"MDT-2m-113194-07-2024","bbox":[-87000,2,0,-106000,0,-2],"type":"Feature","links":[{"rel":"collection","type":"application/json","href":"https://dgt-be.a.incd.pt:8081/collections/MDT-2m"},{"rel":"parent","type":"application/json","href":"https://dgt-be.a.incd.pt:8081/collections/MDT-2m"},{"rel":"root","type":"application/json","href":"https://dgt-be.a.incd.pt:8081/"},{"rel":"self","type":"application/geo+json","href":"https://dgt-be.a.incd.pt:8081/collections/MDT-2m/items/MDT-2m-113194-07-2024"}],"assets":{"data":{"href":"https://cdd.dgterritorio.gov.pt/dgt-be/v1/download/201371da7cddc8988799b08fe5ac9be387005d28755ff835da914b0bc2c855ad","type":"image/tiff;
+        application=geotiff","roles":["data","visual"]}},"geometry":{"type":"Polygon","coordinates":[[[-9.1333284,38.7091897],[-9.1332029,38.7001829],[-9.1217092,38.7002807],[-9.1218332,38.7092875],[-9.1333284,38.7091897]]]},"collection":"MDT-2m","properties":{"bands":[{"band":1,"type":"Float32","block":[500,4],"metadata":{},"noDataValue":-999,"colorInterpretation":"Gray"}],"version":"01","datetime":"2025-07-16T09:05:29Z","file:size":1001129,"proj:wkt2":"PROJCRS[\"ETRS89
+        / Portugal TM06\",\n    BASEGEOGCRS[\"ETRS89\",\n        ENSEMBLE[\"European
+        Terrestrial Reference System 1989 ensemble\",\n            MEMBER[\"European
+        Terrestrial Reference Frame 1989\"],\n            MEMBER[\"European Terrestrial
+        Reference Frame 1990\"],\n            MEMBER[\"European Terrestrial Reference
+        Frame 1991\"],\n            MEMBER[\"European Terrestrial Reference Frame
+        1992\"],\n            MEMBER[\"European Terrestrial Reference Frame 1993\"],\n            MEMBER[\"European
+        Terrestrial Reference Frame 1994\"],\n            MEMBER[\"European Terrestrial
+        Reference Frame 1996\"],\n            MEMBER[\"European Terrestrial Reference
+        Frame 1997\"],\n            MEMBER[\"European Terrestrial Reference Frame
+        2000\"],\n            MEMBER[\"European Terrestrial Reference Frame 2005\"],\n            MEMBER[\"European
+        Terrestrial Reference Frame 2014\"],\n            MEMBER[\"European Terrestrial
+        Reference Frame 2020\"],\n            ELLIPSOID[\"GRS 1980\",6378137,298.257222101,\n                LENGTHUNIT[\"metre\",1]],\n            ENSEMBLEACCURACY[0.1]],\n        PRIMEM[\"Greenwich\",0,\n            ANGLEUNIT[\"degree\",0.0174532925199433]],\n        ID[\"EPSG\",4258]],\n    CONVERSION[\"Portugual
+        TM06\",\n        METHOD[\"Transverse Mercator\",\n            ID[\"EPSG\",9807]],\n        PARAMETER[\"Latitude
+        of natural origin\",39.6682583333333,\n            ANGLEUNIT[\"degree\",0.0174532925199433],\n            ID[\"EPSG\",8801]],\n        PARAMETER[\"Longitude
+        of natural origin\",-8.13310833333333,\n            ANGLEUNIT[\"degree\",0.0174532925199433],\n            ID[\"EPSG\",8802]],\n        PARAMETER[\"Scale
+        factor at natural origin\",1,\n            SCALEUNIT[\"unity\",1],\n            ID[\"EPSG\",8805]],\n        PARAMETER[\"False
+        easting\",0,\n            LENGTHUNIT[\"metre\",1],\n            ID[\"EPSG\",8806]],\n        PARAMETER[\"False
+        northing\",0,\n            LENGTHUNIT[\"metre\",1],\n            ID[\"EPSG\",8807]]],\n    CS[Cartesian,2],\n        AXIS[\"easting
+        (X)\",east,\n            ORDER[1],\n            LENGTHUNIT[\"metre\",1]],\n        AXIS[\"northing
+        (Y)\",north,\n            ORDER[2],\n            LENGTHUNIT[\"metre\",1]],\n    USAGE[\n        SCOPE[\"Topographic
+        mapping (medium scale).\"],\n        AREA[\"Portugal - mainland - onshore.\"],\n        BBOX[36.95,-9.56,42.16,-6.19]],\n    ID[\"EPSG\",3763]]","published":"2025-07-16T09:06:38Z","proj:geometry":{"type":"Polygon","coordinates":[[[-9.1333284,38.7091897],[-9.1332029,38.7001829],[-9.1217092,38.7002807],[-9.1218332,38.7092875],[-9.1333284,38.7091897]]]},"proj:projjson":{"id":{"code":3763,"authority":"EPSG"},"area":"Portugal
+        - mainland - onshore.","bbox":{"east_longitude":-6.19,"north_latitude":42.16,"south_latitude":36.95,"west_longitude":-9.56},"name":"ETRS89
+        / Portugal TM06","type":"ProjectedCRS","scope":"Topographic mapping (medium
+        scale).","$schema":"https://proj.org/schemas/v0.7/projjson.schema.json","base_crs":{"id":{"code":4258,"authority":"EPSG"},"name":"ETRS89","type":"GeographicCRS","datum_ensemble":{"id":{"code":6258,"authority":"EPSG"},"name":"European
+        Terrestrial Reference System 1989 ensemble","members":[{"id":{"code":1178,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1989"},{"id":{"code":1179,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1990"},{"id":{"code":1180,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1991"},{"id":{"code":1181,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1992"},{"id":{"code":1182,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1993"},{"id":{"code":1183,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1994"},{"id":{"code":1184,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1996"},{"id":{"code":1185,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1997"},{"id":{"code":1186,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 2000"},{"id":{"code":1204,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 2005"},{"id":{"code":1206,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 2014"},{"id":{"code":1382,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 2020"}],"accuracy":"0.1","ellipsoid":{"name":"GRS
+        1980","semi_major_axis":6378137,"inverse_flattening":298.257222101}},"coordinate_system":{"axis":[{"name":"Geodetic
+        latitude","unit":"degree","direction":"north","abbreviation":"Lat"},{"name":"Geodetic
+        longitude","unit":"degree","direction":"east","abbreviation":"Lon"}],"subtype":"ellipsoidal"}},"conversion":{"name":"Portugual
+        TM06","method":{"id":{"code":9807,"authority":"EPSG"},"name":"Transverse Mercator"},"parameters":[{"id":{"code":8801,"authority":"EPSG"},"name":"Latitude
+        of natural origin","unit":"degree","value":39.6682583333333},{"id":{"code":8802,"authority":"EPSG"},"name":"Longitude
+        of natural origin","unit":"degree","value":-8.13310833333333},{"id":{"code":8805,"authority":"EPSG"},"name":"Scale
+        factor at natural origin","unit":"unity","value":1},{"id":{"code":8806,"authority":"EPSG"},"name":"False
+        easting","unit":"metre","value":0},{"id":{"code":8807,"authority":"EPSG"},"name":"False
+        northing","unit":"metre","value":0}]},"coordinate_system":{"axis":[{"name":"Easting","unit":"metre","direction":"east","abbreviation":"X"},{"name":"Northing","unit":"metre","direction":"north","abbreviation":"Y"}],"subtype":"Cartesian"}}},"stac_version":"1.1.0","stac_extensions":["https://stac-extensions.github.io/raster/v2.0.0/schema.json","https://stac-extensions.github.io/timestamps/v1.1.0/schema.json","https://stac-extensions.github.io/version/v1.2.0/schema.json","https://stac-extensions.github.io/projection/v1.1.0/schema.json"]}],"links":[{"rel":"root","type":"application/json","href":"https://dgt-be.a.incd.pt:8081/"},{"rel":"self","type":"application/json","href":"https://dgt-be.a.incd.pt:8081/search"}]}'
+    headers:
+      Access-Control-Allow-Credentials:
+      - 'true'
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '7139'
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Sat, 26 Sep 2026 13:34:34 GMT
+      ETag:
+      - W/"1be3-pqr9JGgITg3DBeFrTs7ILo34eZ8"
+      Server:
+      - nginx/1.31.4
+      Vary:
+      - Origin
+      X-Powered-By:
+      - Express
+    status:
+      code: 200
+      message: OK
+- request:
+    body: '{"limit": 10, "collections": ["MDT-2m"], "intersects": {"type": "Polygon",
+      "coordinates": [[[-9.12640677428321, 38.707476506513835], [-9.122957895932906,
+      38.70747642257686], [-9.122957895932906, 38.703345132477494], [-9.126349614063367,
+      38.70334521584983], [-9.12640677428321, 38.707476506513835]]]}}'
+    headers:
+      Accept:
+      - '*/*'
+      Accept-Encoding:
+      - gzip, deflate
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '300'
+      Content-Type:
+      - application/json
+      User-Agent:
+      - cddpt/0.0.1 (+https://pypi.org/project/cddpt/)
+    method: POST
+    uri: https://cdd.dgterritorio.gov.pt/dgt-be/v1/search
+  response:
+    body:
+      string: '{"type":"FeatureCollection","context":{"limit":10,"returned":1},"features":[{"id":"MDT-2m-113194-07-2024","bbox":[-87000,2,0,-106000,0,-2],"type":"Feature","links":[{"rel":"collection","type":"application/json","href":"https://dgt-be.a.incd.pt:8081/collections/MDT-2m"},{"rel":"parent","type":"application/json","href":"https://dgt-be.a.incd.pt:8081/collections/MDT-2m"},{"rel":"root","type":"application/json","href":"https://dgt-be.a.incd.pt:8081/"},{"rel":"self","type":"application/geo+json","href":"https://dgt-be.a.incd.pt:8081/collections/MDT-2m/items/MDT-2m-113194-07-2024"}],"assets":{"data":{"href":"https://cdd.dgterritorio.gov.pt/dgt-be/v1/download/43b7df5106b53f139d9e33bb8740ca11458d449ce976bf1594395175e11c5ea5","type":"image/tiff;
+        application=geotiff","roles":["data","visual"]}},"geometry":{"type":"Polygon","coordinates":[[[-9.1333284,38.7091897],[-9.1332029,38.7001829],[-9.1217092,38.7002807],[-9.1218332,38.7092875],[-9.1333284,38.7091897]]]},"collection":"MDT-2m","properties":{"bands":[{"band":1,"type":"Float32","block":[500,4],"metadata":{},"noDataValue":-999,"colorInterpretation":"Gray"}],"version":"01","datetime":"2025-07-16T09:05:29Z","file:size":1001129,"proj:wkt2":"PROJCRS[\"ETRS89
+        / Portugal TM06\",\n    BASEGEOGCRS[\"ETRS89\",\n        ENSEMBLE[\"European
+        Terrestrial Reference System 1989 ensemble\",\n            MEMBER[\"European
+        Terrestrial Reference Frame 1989\"],\n            MEMBER[\"European Terrestrial
+        Reference Frame 1990\"],\n            MEMBER[\"European Terrestrial Reference
+        Frame 1991\"],\n            MEMBER[\"European Terrestrial Reference Frame
+        1992\"],\n            MEMBER[\"European Terrestrial Reference Frame 1993\"],\n            MEMBER[\"European
+        Terrestrial Reference Frame 1994\"],\n            MEMBER[\"European Terrestrial
+        Reference Frame 1996\"],\n            MEMBER[\"European Terrestrial Reference
+        Frame 1997\"],\n            MEMBER[\"European Terrestrial Reference Frame
+        2000\"],\n            MEMBER[\"European Terrestrial Reference Frame 2005\"],\n            MEMBER[\"European
+        Terrestrial Reference Frame 2014\"],\n            MEMBER[\"European Terrestrial
+        Reference Frame 2020\"],\n            ELLIPSOID[\"GRS 1980\",6378137,298.257222101,\n                LENGTHUNIT[\"metre\",1]],\n            ENSEMBLEACCURACY[0.1]],\n        PRIMEM[\"Greenwich\",0,\n            ANGLEUNIT[\"degree\",0.0174532925199433]],\n        ID[\"EPSG\",4258]],\n    CONVERSION[\"Portugual
+        TM06\",\n        METHOD[\"Transverse Mercator\",\n            ID[\"EPSG\",9807]],\n        PARAMETER[\"Latitude
+        of natural origin\",39.6682583333333,\n            ANGLEUNIT[\"degree\",0.0174532925199433],\n            ID[\"EPSG\",8801]],\n        PARAMETER[\"Longitude
+        of natural origin\",-8.13310833333333,\n            ANGLEUNIT[\"degree\",0.0174532925199433],\n            ID[\"EPSG\",8802]],\n        PARAMETER[\"Scale
+        factor at natural origin\",1,\n            SCALEUNIT[\"unity\",1],\n            ID[\"EPSG\",8805]],\n        PARAMETER[\"False
+        easting\",0,\n            LENGTHUNIT[\"metre\",1],\n            ID[\"EPSG\",8806]],\n        PARAMETER[\"False
+        northing\",0,\n            LENGTHUNIT[\"metre\",1],\n            ID[\"EPSG\",8807]]],\n    CS[Cartesian,2],\n        AXIS[\"easting
+        (X)\",east,\n            ORDER[1],\n            LENGTHUNIT[\"metre\",1]],\n        AXIS[\"northing
+        (Y)\",north,\n            ORDER[2],\n            LENGTHUNIT[\"metre\",1]],\n    USAGE[\n        SCOPE[\"Topographic
+        mapping (medium scale).\"],\n        AREA[\"Portugal - mainland - onshore.\"],\n        BBOX[36.95,-9.56,42.16,-6.19]],\n    ID[\"EPSG\",3763]]","published":"2025-07-16T09:06:38Z","proj:geometry":{"type":"Polygon","coordinates":[[[-9.1333284,38.7091897],[-9.1332029,38.7001829],[-9.1217092,38.7002807],[-9.1218332,38.7092875],[-9.1333284,38.7091897]]]},"proj:projjson":{"id":{"code":3763,"authority":"EPSG"},"area":"Portugal
+        - mainland - onshore.","bbox":{"east_longitude":-6.19,"north_latitude":42.16,"south_latitude":36.95,"west_longitude":-9.56},"name":"ETRS89
+        / Portugal TM06","type":"ProjectedCRS","scope":"Topographic mapping (medium
+        scale).","$schema":"https://proj.org/schemas/v0.7/projjson.schema.json","base_crs":{"id":{"code":4258,"authority":"EPSG"},"name":"ETRS89","type":"GeographicCRS","datum_ensemble":{"id":{"code":6258,"authority":"EPSG"},"name":"European
+        Terrestrial Reference System 1989 ensemble","members":[{"id":{"code":1178,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1989"},{"id":{"code":1179,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1990"},{"id":{"code":1180,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1991"},{"id":{"code":1181,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1992"},{"id":{"code":1182,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1993"},{"id":{"code":1183,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1994"},{"id":{"code":1184,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1996"},{"id":{"code":1185,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 1997"},{"id":{"code":1186,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 2000"},{"id":{"code":1204,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 2005"},{"id":{"code":1206,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 2014"},{"id":{"code":1382,"authority":"EPSG"},"name":"European
+        Terrestrial Reference Frame 2020"}],"accuracy":"0.1","ellipsoid":{"name":"GRS
+        1980","semi_major_axis":6378137,"inverse_flattening":298.257222101}},"coordinate_system":{"axis":[{"name":"Geodetic
+        latitude","unit":"degree","direction":"north","abbreviation":"Lat"},{"name":"Geodetic
+        longitude","unit":"degree","direction":"east","abbreviation":"Lon"}],"subtype":"ellipsoidal"}},"conversion":{"name":"Portugual
+        TM06","method":{"id":{"code":9807,"authority":"EPSG"},"name":"Transverse Mercator"},"parameters":[{"id":{"code":8801,"authority":"EPSG"},"name":"Latitude
+        of natural origin","unit":"degree","value":39.6682583333333},{"id":{"code":8802,"authority":"EPSG"},"name":"Longitude
+        of natural origin","unit":"degree","value":-8.13310833333333},{"id":{"code":8805,"authority":"EPSG"},"name":"Scale
+        factor at natural origin","unit":"unity","value":1},{"id":{"code":8806,"authority":"EPSG"},"name":"False
+        easting","unit":"metre","value":0},{"id":{"code":8807,"authority":"EPSG"},"name":"False
+        northing","unit":"metre","value":0}]},"coordinate_system":{"axis":[{"name":"Easting","unit":"metre","direction":"east","abbreviation":"X"},{"name":"Northing","unit":"metre","direction":"north","abbreviation":"Y"}],"subtype":"Cartesian"}}},"stac_version":"1.1.0","stac_extensions":["https://stac-extensions.github.io/raster/v2.0.0/schema.json","https://stac-extensions.github.io/timestamps/v1.1.0/schema.json","https://stac-extensions.github.io/version/v1.2.0/schema.json","https://stac-extensions.github.io/projection/v1.1.0/schema.json"]}],"links":[{"rel":"root","type":"application/json","href":"https://dgt-be.a.incd.pt:8081/"},{"rel":"self","type":"application/json","href":"https://dgt-be.a.incd.pt:8081/search"}]}'
+    headers:
+      Access-Control-Allow-Credentials:
+      - 'true'
+      Connection:
+      - keep-alive
+      Content-Length:
+      - '7139'
+      Content-Type:
+      - application/json; charset=utf-8
+      Date:
+      - Sat, 26 Sep 2026 13:34:34 GMT
+      ETag:
+      - W/"1be3-amt41OH8s0HDR2SySq6uqDJ0T94"
+      Server:
+      - nginx/1.31.4
+      Vary:
+      - Origin
+      X-Powered-By:
+      - Express
+    status:
+      code: 200
+      message: OK
+version: 1

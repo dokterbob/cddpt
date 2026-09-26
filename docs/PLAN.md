@@ -251,3 +251,23 @@ with `MAX_Z_ERROR=0.05`) follows after.
 - Rate limits uncharacterized — ship conservative defaults.
 - License contradiction in DGT metadata — surface `collection.license` verbatim; print an
   attribution reminder after downloads.
+
+## Findings during implementation (M2, 2026-09-26)
+
+These refine the probing results above:
+
+- `/collections` `data` is `{"collections": [...], "models", "reservedKeys", "keywords",
+  "translations", "catalog"}`; `/collections/{id}` `data` is the bare Collection.
+- Visibility lives at `summaries.visibility` (a list). Of 21 live collections, the 14 mainland
+  ones are `["show"]`, the 7 Açores ones `["hide"]`. `summaries.access` is `["private"]`
+  everywhere. No collection has `item_assets`, so "downloadable" = visibility only.
+- `pystac.Collection.from_dict()` silently rewrites `"proprietary"` → `"other"` during
+  migration; cddpt uses `migrate=False` and reads `license` from the raw dict.
+- The corrupted geotransform `bbox` is **per batch, not per collection** (e.g. 2024 MDT-2m
+  items corrupted, 2025 ones fine) — sanitisation is unconditional for every item.
+- Tile-ID `originY` is the tile's **top (max-Y) edge**, confirmed against geotransforms and
+  reprojected LAZ bboxes.
+- Orthophoto assets have `roles: ["visual"]` only (no `"data"`); asset selection prefers
+  `"data"` and falls back to `"visual"`.
+- `pystac_client.StacApiIO` has no session-injection parameter; cddpt replaces its
+  `.session` with the governed session before passing it to `ItemSearch(stac_io=...)`.

@@ -1,0 +1,43 @@
+{
+  "type": "FeatureCollection",
+  "crs": {
+    "type": "name",
+    "properties": {
+      "name": "urn:ogc:def:crs:EPSG::3763"
+    }
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"tile": "113194"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-87000, -107000],
+            [-86000, -107000],
+            [-86000, -106000],
+            [-87000, -106000],
+            [-87000, -107000]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"tile": "113195"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-87000, -106000],
+            [-86000, -106000],
+            [-86000, -105000],
+            [-87000, -105000],
+            [-87000, -106000]
+          ]
+        ]
+      }
+    }
+  ]
+}

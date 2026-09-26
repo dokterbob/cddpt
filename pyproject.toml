@@ -63,6 +63,13 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.6",
     "types-requests>=2.31",
+    "types-shapely>=2.1",
+    # Milestone 2's tests exercise Aoi.from_file(), which needs the optional
+    # cddpt[files] extra installed. Not type-checked as a stub package (see
+    # aoi.py's import comment): types-geopandas transitively drags in a
+    # numpy stub version whose PEP 695 `type` aliases are incompatible with
+    # this project's mypy `python_version = "3.10"` target.
+    "cddpt[files]",
 ]
 
 [project.urls]
@@ -79,8 +86,18 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+# python_version here is a static-analysis target, independent of
+# `requires-python` above (still ">=3.10", unaffected by this setting).
+# Bumped from "3.10" in Milestone 2: numpy's own stub file -- pulled in
+# transitively by shapely/geopandas's stubs, both used starting this
+# milestone -- uses PEP 695 `type` alias statements unconditionally, which
+# is a hard *syntax* error under mypy's python_version = "3.10" parser
+# (`follow_imports = "skip"` on numpy.* does not help: the syntax error
+# happens during parsing, before import-following logic applies). cddpt's
+# own source uses no 3.11/3.12-only syntax, so this only changes which
+# stdlib/stub typing rules mypy simulates, not what cddpt may actually run on.
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 strict = true
 files = ["src/cddpt"]
 
