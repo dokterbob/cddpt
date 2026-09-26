@@ -105,7 +105,7 @@ class InMemoryKeyring(keyring.backend.KeyringBackend):
     """A ``dict``-backed keyring, for tests only."""
 
     @properties.classproperty
-    def priority(cls) -> float:  # noqa: N805 -- classproperty, not a normal method
+    def priority(cls) -> float:
         return 1
 
     def __init__(self) -> None:

@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<!--
+  Synthetic: an OTP/MFA "required action" page, in Keycloak's well-known
+  default theme shape (form id="kc-otp-login-form"). Not fetched from DGT
+  live (the probed account has no MFA enabled) -- modeled from Keycloak's
+  documented default login-otp.ftl template so cddpt's "unexpected page"
+  detection has a fixture to exercise it against.
+-->
+<html lang="pt">
+<head><meta charset="UTF-8"><title>Autenticação de dois fatores</title></head>
+<body>
+<div id="kc-form">
+  <form id="kc-otp-login-form" action="https://auth.cdd.dgterritorio.gov.pt/realms/dgterritorio/login-actions/authenticate?session_code=PLACEHOLDER_SESSION_CODE&amp;execution=PLACEHOLDER_EXECUTION" method="post">
+    <input type="text" id="otp" name="otp" autocomplete="off" />
+    <button type="submit" id="kc-login">Entrar</button>
+  </form>
+</div>
+</body>
+</html>

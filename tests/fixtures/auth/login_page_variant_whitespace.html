@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<!--
+  Same real Keycloak login form as login_page.html, but with attribute
+  order shuffled, quote style mixed (single vs double), extra/irregular
+  whitespace, and boolean attributes given unquoted -- exercises that
+  cddpt.auth.form_provider.parse_login_page() finds form#kc-form-login (and
+  its fields) regardless of exact markup formatting.
+-->
+<html lang='pt'>
+<head><meta charset="UTF-8">
+    <title>Iniciar sessão</title></head>
+<body>
+
+
+<div   class = "pf-v5-c-login" >
+  <form
+      method='post'
+      novalidate
+      class="pf-v5-c-form   pf-v5-u-w-100"
+      id="kc-form-login"
+
+      action='https://auth.cdd.dgterritorio.gov.pt/realms/dgterritorio/login-actions/authenticate?session_code=PLACEHOLDER_SESSION_CODE&amp;execution=PLACEHOLDER_EXECUTION&amp;client_id=aai-oidc-dgt&amp;tab_id=PLACEHOLDER_TAB_ID&amp;client_data=PLACEHOLDER_CLIENT_DATA'
+  >
+
+      <input autocomplete="username"
+             type="text"
+             autofocus
+             name='username'
+             id='username'
+             value=""
+      />
+
+      <input
+        name="password"
+             id="password"
+        autocomplete='current-password'
+        type='password' value=''>
+
+      <input name="credentialId" type="hidden" id="id-hidden-input">
+
+      <button   type="submit"  id='kc-login'   name="login" >Entrar</button>
+  </form>
+</div>
+
+
+</body>
+</html>

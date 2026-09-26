@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<!--
+  Synthetic: a login form that does NOT carry id="kc-form-login" (as if DGT
+  had changed Keycloak's theme), but still contains a recognisable password
+  input -- exercises parse_login_page()'s documented fallback ("a form
+  containing a password input, but log a warning").
+-->
+<html lang="pt">
+<head><meta charset="UTF-8"><title>Iniciar sessão</title></head>
+<body>
+<div id="kc-form">
+  <form id="some-other-theme-form" action="https://auth.cdd.dgterritorio.gov.pt/realms/dgterritorio/login-actions/authenticate?session_code=PLACEHOLDER_SESSION_CODE&amp;execution=PLACEHOLDER_EXECUTION" method="post">
+    <input type="text" name="username" id="username" value="" />
+    <input type="password" name="password" id="password" value="" />
+    <input type="hidden" name="credentialId" id="id-hidden-input" />
+    <button type="submit" id="kc-login">Entrar</button>
+  </form>
+</div>
+</body>
+</html>

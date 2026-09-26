@@ -6,7 +6,7 @@ import warnings
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from cddpt import __version__
 from cddpt.settings import Settings
@@ -17,6 +17,11 @@ def test_defaults() -> None:
 
     assert settings.api_base_url == "https://cdd.dgterritorio.gov.pt/dgt-be/v1"
     assert settings.site_base_url == "https://cdd.dgterritorio.gov.pt"
+    assert settings.auth_base_url == "https://auth.cdd.dgterritorio.gov.pt"
+    assert settings.keycloak_realm == "dgterritorio"
+    assert settings.keycloak_client_id == "aai-oidc-dgt"
+    assert settings.username is None
+    assert settings.password is None
     assert settings.ca_bundle is None
     assert settings.requests_per_second == 2.0
     assert settings.burst == 4
@@ -27,6 +32,25 @@ def test_defaults() -> None:
     assert isinstance(settings.config_dir, Path)
     assert isinstance(settings.cache_dir, Path)
     assert isinstance(settings.state_dir, Path)
+
+
+def test_password_is_never_revealed_by_repr_or_str() -> None:
+    settings = Settings(_env_file=None, username="alice", password=SecretStr("sentinel-password"))
+
+    assert "sentinel-password" not in repr(settings)
+    assert "sentinel-password" not in str(settings)
+    assert "**********" in repr(settings)
+
+
+def test_username_and_password_settable_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CDDPT_USERNAME", "alice@example.test")
+    monkeypatch.setenv("CDDPT_PASSWORD", "sentinel-password")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.username == "alice@example.test"
+    assert settings.password is not None
+    assert settings.password.get_secret_value() == "sentinel-password"
 
 
 def test_user_agent_mentions_version_and_is_generic() -> None:

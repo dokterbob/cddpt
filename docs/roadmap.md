@@ -7,7 +7,7 @@ Status tracker for the milestones in [PLAN.md](PLAN.md).
 | 1 | Skeleton + HTTP/TLS foundation | done |
 | 2 | Catalog + AOI (anonymous) | done |
 | 3 | CLI part 1 (collections, search, estimate) | done |
-| 4 | Auth — **blocked on a human-registered CDD account** | planned |
+| 4 | Auth | done |
 | 5 | Downloader | planned |
 | 6 | Hardening + PyPI 0.1.0 | planned |
 | 7 | QGIS plugin — see [qgis-plugin.md](qgis-plugin.md) | planned |
