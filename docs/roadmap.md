@@ -4,8 +4,8 @@ Status tracker for the milestones in [PLAN.md](PLAN.md).
 
 | # | Milestone | Status |
 |---|---|---|
-| 1 | Skeleton + HTTP/TLS foundation | in progress |
-| 2 | Catalog + AOI (anonymous) | planned |
+| 1 | Skeleton + HTTP/TLS foundation | done |
+| 2 | Catalog + AOI (anonymous) | in progress |
 | 3 | CLI part 1 (collections, search, estimate) | planned |
 | 4 | Auth — **blocked on a human-registered CDD account** | planned |
 | 5 | Downloader | planned |

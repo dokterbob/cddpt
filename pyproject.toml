@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cddpt"
+version = "0.0.1"
+description = """\
+Unofficial client for DGT's (Direção-Geral do Território, Portugal) \"CDD – Centro de \
+Dados\" geodata portal. Unofficial, independent client. Not affiliated with, endorsed \
+by, or supported by Direção-Geral do Território.\
+"""
+readme = "README.md"
+requires-python = ">=3.10"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Mathijs de Bruin", email = "mathijs@mathijsfietst.nl" }]
+keywords = ["dgt", "cdd", "portugal", "geodata", "stac", "gis"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+
+dependencies = [
+    "pystac-client>=0.8",
+    "pystac>=1.10",
+    "shapely>=2",
+    "pyproj>=3.6",
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "truststore>=0.9",
+    "keyring>=24.0",
+    "platformdirs>=4.0",
+    "pydantic-settings>=2.2",
+    "tenacity>=8.2",
+    # >=4.5: cddpt's ratelimit.py uses the 4.x `Rate(..., burst=)` parameter,
+    # the `StateBucket`/`TokenBucket` (GCRA) classes, and per-key wait
+    # recording that pyrate-limiter's own source identifies as the "4.5
+    # contract" (see in_memory_bucket.py's docstring) -- none of which exist
+    # in the 3.x API this was previously (incorrectly) pinned against.
+    "pyrate-limiter>=4.5",
+    "urllib3>=2",
+]
+
+[project.optional-dependencies]
+files = ["geopandas>=0.14", "pyogrio>=0.7"]
+cli = ["typer>=0.12", "rich>=13.0", "tqdm>=4.66"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "vcrpy>=6.0",
+    "mypy>=1.10",
+    "ruff>=0.6",
+    "types-requests>=2.31",
+]
+
+[project.urls]
+Homepage = "https://github.com/dokterbob/cddpt"
+Repository = "https://github.com/dokterbob/cddpt"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cddpt"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src/cddpt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not network'"
+markers = [
+    "network: marks tests that hit the real CDD API (deselected by default)",
+]
+
+[tool.coverage.run]
+source = ["src/cddpt"]
