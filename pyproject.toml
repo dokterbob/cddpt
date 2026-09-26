@@ -60,6 +60,11 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "vcrpy>=6.0",
+    # Milestone 4 (auth): mocks the Keycloak form-login HTTP exchange with
+    # synthetic fixtures. Never vcrpy for anything authenticated -- vcrpy
+    # cassettes are real recorded traffic and this task must never record
+    # real credentials/cookies to disk.
+    "responses>=0.25",
     "mypy>=1.10",
     "ruff>=0.6",
     "types-requests>=2.31",

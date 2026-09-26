@@ -18,7 +18,7 @@ import typer
 from rich.console import Console
 from rich.logging import RichHandler
 
-from ..errors import CddError
+from ..errors import AuthError, CddError
 from ..models import CollectionInfo
 from ..settings import Settings
 
@@ -41,8 +41,9 @@ EXIT_ERROR = 1
 #: Usage error -- typer/click's own default for bad/missing CLI arguments
 #: (e.g. a missing required option, an out-of-choice --format value).
 EXIT_USAGE = 2
-#: Reserved: authentication failure (auth lands in a later milestone; no
-#: command raises this yet).
+#: Authentication failure -- any cddpt.errors.AuthError (including its
+#: SessionExpired subclass), raised by `cddpt auth login`/`status`/`logout`
+#: or by anything else that hits an auth problem. See handle_errors below.
 EXIT_AUTH_FAILURE = 3
 #: Reserved: insufficient disk space (the downloader lands in a later
 #: milestone; no command raises this yet).
@@ -162,8 +163,11 @@ def describe_error(exc: CddError) -> str:
 
 def handle_errors(func: _F) -> _F:
     """Command decorator: map any :class:`~cddpt.errors.CddError` raised by
-    ``func`` to a friendly one-line rich message on stderr and
-    :data:`EXIT_ERROR` -- a traceback only with ``--verbose``.
+    ``func`` to a friendly one-line rich message on stderr and either
+    :data:`EXIT_AUTH_FAILURE` (for an :class:`~cddpt.errors.AuthError`,
+    including its :class:`~cddpt.errors.SessionExpired` subclass) or
+    :data:`EXIT_ERROR` (everything else) -- a traceback only with
+    ``--verbose``.
 
     Applied to every command function directly (rather than relying on a
     single top-level try/except around the whole app) so it is exercised the
@@ -181,7 +185,8 @@ def handle_errors(func: _F) -> _F:
                 _err_console.print_exception()
             else:
                 _err_console.print(f"[bold red]Error:[/bold red] {describe_error(exc)}")
-            raise typer.Exit(code=EXIT_ERROR) from None
+            exit_code = EXIT_AUTH_FAILURE if isinstance(exc, AuthError) else EXIT_ERROR
+            raise typer.Exit(code=exit_code) from None
 
     return wrapper  # type: ignore[return-value]
 

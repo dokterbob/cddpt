@@ -12,6 +12,7 @@ import typer
 
 from .. import __version__
 from . import _common
+from .auth import app as auth_app
 from .collections import app as collections_app
 from .search import search_command
 
@@ -22,6 +23,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+app.add_typer(auth_app, name="auth")
 app.add_typer(collections_app, name="collections")
 app.command("search", help=f"Search a collection/AOI. {_common.DISCLAIMER}")(search_command)
 

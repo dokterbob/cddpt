@@ -12,7 +12,7 @@ import warnings
 from pathlib import Path
 
 from platformdirs import PlatformDirs
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from ._version import __version__
@@ -46,6 +46,24 @@ class Settings(BaseSettings):
     # -- API endpoints --------------------------------------------------
     api_base_url: str = "https://cdd.dgterritorio.gov.pt/dgt-be/v1"
     site_base_url: str = "https://cdd.dgterritorio.gov.pt"
+    #: Keycloak's own host -- separate from `site_base_url` since it's a
+    #: distinct TLS endpoint DGT could in principle move independently (see
+    #: cddpt.auth.probe.doctor()'s TLS-reachability checks).
+    auth_base_url: str = "https://auth.cdd.dgterritorio.gov.pt"
+    keycloak_realm: str = "dgterritorio"
+    #: Confidential client; loopback redirect URIs are rejected and there is
+    #: no token/API-key path -- see docs/PLAN.md's "Auth design". Used only
+    #: by cddpt.auth.probe's regression detector, never to attempt OAuth.
+    keycloak_client_id: str = "aai-oidc-dgt"
+
+    # -- Credentials (all optional; auth.form_provider falls back to keyring
+    # when neither is set) -----------------------------------------------
+    #: CDD account username/email. Settable via CDDPT_USERNAME.
+    username: str | None = None
+    #: CDD account password. A pydantic SecretStr so it is masked in
+    #: repr()/str() and never appears in logs by accident. Settable via
+    #: CDDPT_PASSWORD.
+    password: SecretStr | None = None
 
     # -- TLS --------------------------------------------------------------
     #: Escape hatch for corporate TLS-inspecting (MITM) proxies. When unset

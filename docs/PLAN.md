@@ -301,4 +301,4 @@ These resolve the "open items requiring a human" and **change the download desig
   token → new pre-signed URL) and continue with `Range` from the `.part` size.
 - An unauthenticated or expired session on `/download/{token}` gives **302 → `/auth/login`**
   (the `SessionExpired` signal); an authorized session with a spent token gives **403 JSON**.
-- Authenticated responses carry no `Set-Cookie`, suggesting the session does not roll.
+- **The session expires absolutely 30 min after login** (no rolling): authenticated responses carry no `Set-Cookie`, and a session last used 1 min after login was rejected (302 → `/auth/login`) at login + 31.5 min.
