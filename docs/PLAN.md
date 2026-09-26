@@ -271,3 +271,34 @@ These refine the probing results above:
   `"data"` and falls back to `"visual"`.
 - `pystac_client.StacApiIO` has no session-injection parameter; cddpt replaces its
   `.session` with the governed session before passing it to `ItemSearch(stac_io=...)`.
+
+## Findings with an authenticated account (M4 pre-work, 2026-09-26)
+
+These resolve the "open items requiring a human" and **change the download design**:
+
+- **Login flow** (works with plain `requests` + BeautifulSoup): `GET /dgt-be/v1/download/{token}`
+  → 302 `https://cdd.dgterritorio.gov.pt/auth/login` → 302 Keycloak
+  `https://auth.cdd.dgterritorio.gov.pt/realms/dgterritorio/protocol/openid-connect/auth`
+  (200, login page). `<form id="kc-form-login">` posts to
+  `/realms/dgterritorio/login-actions/authenticate` with inputs `username`, `password`,
+  hidden `credentialId` (empty). On success: 302 → `https://cdd.dgterritorio.gov.pt/auth/callback`
+  (sets `connect.sid`, `auth_session`, `auth_user`, `auth_email`, all 30-min `HttpOnly`)
+  → 302 → `/dgt-fe/downloads` (200 HTML). Anonymous visitors already get a `connect.sid`;
+  login upgrades that session server-side.
+- **A bare `connect.sid` is sufficient** to authorize `/download/{token}` (no CSRF/Origin
+  check) — `ManualCookieAuthProvider` is viable.
+- **Download tokens are minted per `/search` response and are single-use.** Two searches for
+  the same item yield different tokens; a used token returns
+  `403 {"status":403,"message":"Forbidden Access - Expired token or file not found"}`.
+  Consequence: never persist/reuse hrefs; mint a fresh token right before each download
+  (`POST /search` with `{"collections":[...], "ids":[item_id]}` works and is cheap).
+- **Authenticated `/download/{token}` does not serve bytes**: it 302s to a **pre-signed S3
+  URL** (MinIO at `https://stor-002.a.acnca.pt:9000/...`, `X-Amz-Expires=3600`). That URL
+  needs no cookies, is reusable within its hour, and **honours `Range`** (`206`,
+  `Accept-Ranges: bytes`). Hence the 30-minute CDD session only gates the token →
+  pre-signed-URL exchange, not the byte transfer. Resume = `Range` against the same
+  pre-signed URL while valid; if it has expired (S3 403), re-mint (search by id → download
+  token → new pre-signed URL) and continue with `Range` from the `.part` size.
+- An unauthenticated or expired session on `/download/{token}` gives **302 → `/auth/login`**
+  (the `SessionExpired` signal); an authorized session with a spent token gives **403 JSON**.
+- Authenticated responses carry no `Set-Cookie`, suggesting the session does not roll.
