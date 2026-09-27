@@ -320,3 +320,24 @@ These resolve the "open items requiring a human" and **change the download desig
 - Destination names derive from item id + media type (`image/tiff*` → `.tif`,
   `application/vnd.laszip` → `.laz`, else `mimetypes`, else `.bin`), so reruns can skip
   completed files without spending tokens; the storage filename is kept in the manifest.
+
+## Findings from the first real downloads (2026-09-27)
+
+- **truststore contexts must never be shared between threads.** `truststore.SSLContext`
+  (0.10.4, latest) flips the context to `CERT_NONE`/`check_hostname=False` around each
+  handshake and locks only the flip, not the handshake, the restore, or the OS verification
+  that reads the same flags. With one context shared by the download threads, verification
+  could run against another thread's relaxed flags and accept an untrusted certificate without
+  a hostname check. urllib3 then emitted `InsecureRequestWarning`, and the shared context could
+  be left stuck at `CERT_NONE`. Reproduced locally: with 2 threads and a self-signed server, about
+  half the connections were accepted. Fix (`http.py`): each HTTPS connection builds its own
+  context, an unverified connection is a hard `TlsVerificationError` rather than a warning, and
+  certificate errors are not retried; they fail at once with a `--ca-bundle` hint.
+  Regression tests: `tests/test_http_tls_concurrency.py`.
+- **Waits are never silent.** `RequestGovernor` reports every breaker, `Retry-After` and
+  retry-backoff wait to `PauseListener`s and counts them (`stats()`). The CLI shows a status
+  line with a countdown above the progress bars and a throttling summary at the end. Logs,
+  warnings and the live display share one rich console. A second console writing to stderr
+  corrupts the display, which is where the "repeated finished bar" lines came from.
+- **Stalled transfers resume.** The S3 stream uses `stall_timeout` (30 s) as its read timeout.
+  A stream that stops delivering bytes is dropped and resumed with `Range`, with a WARNING.

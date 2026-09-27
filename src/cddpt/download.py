@@ -60,7 +60,11 @@ everything else in cddpt, so its own retries are about *correctness*
   streaming attempt, retrying on a transient network error (resuming via
   ``Range`` from the ``.part`` file's current size) or an expired pre-signed
   URL (re-minted first). Any other exception (a real per-asset failure, or a
-  deliberate cancellation) is never retried.
+  deliberate cancellation) is never retried. A *stalled* stream counts as a
+  transient network error: the transfer GET uses ``settings.stall_timeout``
+  (default 30 s) as its socket read timeout, so a stream that delivers no
+  bytes for that long is dropped and resumed via ``Range`` -- logged at
+  WARNING -- instead of hanging silently for the full ``read_timeout``.
 """
 
 from __future__ import annotations
@@ -79,7 +83,13 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 import requests
-from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import (
+    RetryCallState,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from .auth.base import AuthManager, AuthSession, is_login_redirect
 from .catalog import CddCatalog
@@ -705,11 +715,36 @@ class Downloader:
 
         presigned_url = self._get_presigned_url(asset)
 
+        def log_resume(state: RetryCallState) -> None:
+            outcome = state.outcome
+            error = outcome.exception() if outcome is not None else None
+            if isinstance(error, _PresignedUrlExpired):
+                reason = "pre-signed URL expired"
+            elif isinstance(
+                error, requests.exceptions.Timeout | requests.exceptions.ConnectionError
+            ):
+                reason = f"stalled or dropped connection ({type(error).__name__})"
+            else:
+                reason = type(error).__name__
+            offset = part_path.stat().st_size if part_path.is_file() else 0
+            wait = state.next_action.sleep if state.next_action is not None else 0.0
+            logger.warning(
+                "cddpt: transfer of %s interrupted (%s); resuming from byte %d in %.0fs "
+                "(attempt %d of %d)",
+                asset.item_id,
+                reason,
+                offset,
+                wait,
+                state.attempt_number + 1,
+                _MAX_TRANSFER_ATTEMPTS,
+            )
+
         retrying = Retrying(
             stop=stop_after_attempt(_MAX_TRANSFER_ATTEMPTS),
             wait=wait_exponential(multiplier=0.5, max=30),
             retry=retry_if_exception_type(_TRANSIENT_TRANSFER_EXCEPTIONS),
             sleep=self._retry_sleep,
+            before_sleep=log_resume,
             reraise=True,
         )
 
@@ -744,7 +779,14 @@ class Downloader:
             _log_safe_url(url),
             start,
         )
-        response = self._transfer_session.get(url, headers=headers, stream=True)
+        response = self._transfer_session.get(
+            url,
+            headers=headers,
+            stream=True,
+            # (connect, per-read) -- see the module docstring's "Retry policy":
+            # a stalled stream fails after stall_timeout, then resumes.
+            timeout=(self._settings.connect_timeout, self._settings.stall_timeout),
+        )
         with response:
             if response.status_code == 416:
                 declared = asset.size_bytes

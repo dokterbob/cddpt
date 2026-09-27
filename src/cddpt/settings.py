@@ -112,6 +112,11 @@ class Settings(BaseSettings):
     # -- HTTP timeouts (seconds) -------------------------------------------
     connect_timeout: float = 10.0
     read_timeout: float = 120.0
+    #: Byte transfers only: a download stream that delivers no data at all
+    #: for this long is treated as stalled -- the connection is dropped and
+    #: the transfer resumes (``Range``) on a fresh one, rather than sitting
+    #: silently on a dead socket for the full ``read_timeout``.
+    stall_timeout: float = 30.0
 
     # -- HTTP identification -------------------------------------------
     user_agent: str = Field(default_factory=_default_user_agent)

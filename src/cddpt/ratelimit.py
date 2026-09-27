@@ -65,12 +65,16 @@ a ``LogAlgorithm`` and raises ``AttributeError`` if handed a
 
 from __future__ import annotations
 
+import contextlib
+import enum
+import itertools
 import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Protocol
 
@@ -104,6 +108,70 @@ class ResponseLike(Protocol):
     def headers(self) -> Mapping[str, str]:
         """Read-only so a covariant ``Mapping`` subtype (e.g.
         ``requests``' ``CaseInsensitiveDict``) satisfies the protocol."""
+
+
+class PauseReason(enum.Enum):
+    """Why the governor (or the retry loop it backs) is holding a request."""
+
+    #: The circuit breaker is open (too many 429/503s in its window).
+    circuit_breaker = "circuit_breaker"
+    #: A server-sent ``Retry-After`` is being honoured globally.
+    retry_after = "retry_after"
+    #: urllib3's own per-request retry wait (exponential backoff, or the
+    #: ``Retry-After`` of the very response being retried).
+    retry_backoff = "retry_backoff"
+
+
+@dataclass(frozen=True, slots=True)
+class GovernorPause:
+    """One wait a request thread is about to sit through.
+
+    Reported to every :class:`PauseListener` *before* the wait starts
+    (:meth:`PauseListener.on_pause`) and again once it is over
+    (:meth:`PauseListener.on_resume`, with the very same object -- so a
+    listener can track concurrent pauses by identity). Several worker
+    threads blocked on the same breaker each report their own pause.
+    """
+
+    #: Unique per pause (monotonically increasing), handy as a dict key.
+    pause_id: int
+    reason: PauseReason
+    #: Planned length of the wait.
+    seconds: float
+    #: Wall-clock (UTC) time the wait is expected to end -- what a UI shows.
+    resume_at: datetime
+    #: For :attr:`PauseReason.retry_backoff`: the HTTP status being retried
+    #: (``None`` for a network/TLS error or when unknown).
+    status: int | None = None
+
+
+class PauseListener(Protocol):
+    """How a front-end (the CLI's rich display, the QGIS plugin) learns
+    that requests are being held back, so a long wait is never silent.
+
+    Called from whichever worker thread is about to wait; implementations
+    must be thread-safe and must not block or raise.
+    """
+
+    def on_pause(self, pause: GovernorPause) -> None: ...
+
+    def on_resume(self, pause: GovernorPause) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class GovernorStats:
+    """Run-level counters for a post-run summary (see
+    :meth:`RequestGovernor.stats`)."""
+
+    #: HTTP 429/503 responses seen (every wire attempt, retries included).
+    throttled_responses: int
+    #: How many times the circuit breaker opened.
+    breaker_trips: int
+    #: Wall-clock seconds during which at least one request was paused by
+    #: the breaker, a ``Retry-After`` or retry backoff (overlapping waits
+    #: in several threads are counted once). Token-bucket pacing is by
+    #: design and is not included.
+    paused_seconds: float
 
 
 class _InjectedClock(AbstractClock):
@@ -183,7 +251,27 @@ class CircuitBreaker:
         self._clock = clock
         self._failures: deque[float] = deque()
         self._open_until: float = 0.0
+        self._trips = 0
         self._lock = threading.Lock()
+
+    @property
+    def failure_threshold(self) -> int:
+        return self._failure_threshold
+
+    @property
+    def window_seconds(self) -> float:
+        return self._window_seconds
+
+    @property
+    def cooldown_seconds(self) -> float:
+        return self._cooldown_seconds
+
+    @property
+    def trips(self) -> int:
+        """How many times this breaker has opened so far."""
+
+        with self._lock:
+            return self._trips
 
     def record_failure(self) -> None:
         """Record one 429/503 response, possibly tripping the breaker."""
@@ -195,13 +283,16 @@ class CircuitBreaker:
             if len(self._failures) >= self._failure_threshold:
                 self._open_until = now + self._cooldown_seconds
                 self._failures.clear()
+                self._trips += 1
+                resume_at = datetime.now() + timedelta(seconds=self._cooldown_seconds)
                 logger.warning(
                     "cddpt circuit breaker tripped: %d failures (HTTP 429/503) "
                     "within %.0fs. Pausing ALL new requests (search and "
-                    "download) for %.0fs before resuming.",
+                    "download) for %.0fs, until about %s.",
                     self._failure_threshold,
                     self._window_seconds,
                     self._cooldown_seconds,
+                    resume_at.strftime("%H:%M:%S"),
                 )
 
     def _prune(self, now: float) -> None:
@@ -228,6 +319,13 @@ class RequestGovernor:
     using the injected ``sleep``), send the request, then call
     :meth:`observe` with the response so 429/503s feed the breaker and any
     ``Retry-After`` header extends the next global wait.
+
+    Waits are never silent: every breaker / ``Retry-After`` / retry-backoff
+    wait is logged (INFO; the breaker trip itself at WARNING) and reported
+    to any :class:`PauseListener` registered via :meth:`add_pause_listener`
+    (this is how the CLI shows "circuit breaker open -- resuming at ..."
+    without the library importing any UI toolkit). :meth:`stats` gives
+    run-level counters for a summary.
     """
 
     def __init__(
@@ -254,6 +352,12 @@ class RequestGovernor:
         )
         self._retry_after_until: float = 0.0
         self._lock = threading.Lock()
+        self._listeners: list[PauseListener] = []
+        self._pause_ids = itertools.count(1)
+        self._throttled_responses = 0
+        self._active_pauses = 0
+        self._paused_since: float = 0.0
+        self._paused_total: float = 0.0
 
     @classmethod
     def from_settings(
@@ -289,6 +393,85 @@ class RequestGovernor:
     @property
     def burst(self) -> int:
         return self._burst
+
+    # -- Observability ------------------------------------------------------
+
+    def add_pause_listener(self, listener: PauseListener) -> None:
+        """Register ``listener`` to be told about every non-trivial wait
+        (see :class:`PauseListener`)."""
+
+        with self._lock:
+            self._listeners.append(listener)
+
+    def remove_pause_listener(self, listener: PauseListener) -> None:
+        with self._lock, contextlib.suppress(ValueError):
+            self._listeners.remove(listener)
+
+    def stats(self) -> GovernorStats:
+        """A snapshot of this run's throttling counters."""
+
+        with self._lock:
+            paused = self._paused_total
+            if self._active_pauses:
+                paused += self._clock() - self._paused_since
+            throttled = self._throttled_responses
+        return GovernorStats(
+            throttled_responses=throttled,
+            breaker_trips=self._breaker.trips,
+            paused_seconds=paused,
+        )
+
+    @contextlib.contextmanager
+    def pausing(
+        self, seconds: float, reason: PauseReason, *, status: int | None = None
+    ) -> Iterator[GovernorPause]:
+        """Report (log + listeners + stats) a wait of ``seconds`` that the
+        body of the ``with`` block performs.
+
+        Used by :meth:`acquire` for its own gate waits, and by
+        :mod:`cddpt.http`'s retry hook around urllib3's per-request backoff
+        sleep -- a wait that would otherwise be invisible to the user.
+        """
+
+        pause = GovernorPause(
+            pause_id=next(self._pause_ids),
+            reason=reason,
+            seconds=seconds,
+            resume_at=datetime.now(timezone.utc) + timedelta(seconds=seconds),
+            status=status,
+        )
+        logger.info(
+            "cddpt request governor: pausing %.1fs (%s%s), resuming around %s.",
+            seconds,
+            reason.value,
+            f", HTTP {status}" if status is not None else "",
+            pause.resume_at.astimezone().strftime("%H:%M:%S"),
+        )
+        with self._lock:
+            if self._active_pauses == 0:
+                self._paused_since = self._clock()
+            self._active_pauses += 1
+            listeners = list(self._listeners)
+        self._notify(listeners, "on_pause", pause)
+        try:
+            yield pause
+        finally:
+            with self._lock:
+                self._active_pauses -= 1
+                if self._active_pauses == 0:
+                    self._paused_total += self._clock() - self._paused_since
+                listeners = list(self._listeners)
+            self._notify(listeners, "on_resume", pause)
+
+    @staticmethod
+    def _notify(listeners: list[PauseListener], method: str, pause: GovernorPause) -> None:
+        for listener in listeners:
+            try:
+                getattr(listener, method)(pause)
+            except Exception:  # a UI bug must never break the transfer
+                logger.exception("cddpt: pause listener %r failed", listener)
+
+    # -- Gate -------------------------------------------------------------
 
     def acquire(self) -> None:
         """Block (via the injected ``sleep``) until a request may proceed.
@@ -332,19 +515,25 @@ class RequestGovernor:
                     self._retry_after_until = max(self._retry_after_until, self._clock() + delay)
 
         if status_code in (429, 503):
+            with self._lock:
+                self._throttled_responses += 1
             self._breaker.record_failure()
 
     def _wait_for_gate(self) -> None:
         while True:
             with self._lock:
-                wait = max(
-                    self._breaker.seconds_until_clear(),
-                    self._retry_after_until - self._clock(),
-                )
+                breaker_wait = self._breaker.seconds_until_clear()
+                retry_after_wait = self._retry_after_until - self._clock()
+            wait = max(breaker_wait, retry_after_wait)
             if wait <= 0:
                 return
-            logger.info("cddpt request governor: pausing %.1fs before next request.", wait)
-            self._sleep(wait)
+            reason = (
+                PauseReason.circuit_breaker
+                if breaker_wait >= retry_after_wait
+                else PauseReason.retry_after
+            )
+            with self.pausing(wait, reason):
+                self._sleep(wait)
 
     def _wait_for_token(self) -> None:
         while True:
@@ -361,4 +550,14 @@ class RequestGovernor:
             self._sleep(wait_seconds)
 
 
-__all__ = ["CircuitBreaker", "ClockFn", "RequestGovernor", "ResponseLike", "SleepFn"]
+__all__ = [
+    "CircuitBreaker",
+    "ClockFn",
+    "GovernorPause",
+    "GovernorStats",
+    "PauseListener",
+    "PauseReason",
+    "RequestGovernor",
+    "ResponseLike",
+    "SleepFn",
+]

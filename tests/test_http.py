@@ -10,20 +10,22 @@ response, rather than going over a real (even loopback) socket.
 
 from __future__ import annotations
 
+import contextlib
 import ssl
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
 import requests
 import truststore
+import urllib3.exceptions
 import urllib3.util
 
 import cddpt.http as http_module
-from cddpt.errors import HttpError
+from cddpt.errors import HttpError, TlsVerificationError
 from cddpt.http import GovernedSession, _build_ssl_context, make_session
-from cddpt.ratelimit import RequestGovernor, ResponseLike
+from cddpt.ratelimit import PauseReason, RequestGovernor, ResponseLike
 from cddpt.settings import Settings
 
 
@@ -35,6 +37,7 @@ class _FakeGovernor:
         self.acquire_calls = 0
         self.observed: list[ResponseLike] = []
         self.observed_raw: list[tuple[int, Mapping[str, str]]] = []
+        self.pauses: list[tuple[float, PauseReason, int | None]] = []
 
     def acquire(self) -> None:
         self.acquire_calls += 1
@@ -44,6 +47,13 @@ class _FakeGovernor:
 
     def observe_raw(self, status_code: int, headers: Mapping[str, str]) -> None:
         self.observed_raw.append((status_code, headers))
+
+    @contextlib.contextmanager
+    def pausing(
+        self, seconds: float, reason: PauseReason, *, status: int | None = None
+    ) -> Iterator[None]:
+        self.pauses.append((seconds, reason, status))
+        yield
 
 
 class _FakeWireResponse:
@@ -365,3 +375,60 @@ def test_make_session_shares_the_given_governor() -> None:
     session = make_session(settings, governor=governor)  # type: ignore[arg-type]
 
     assert session._governor is governor
+
+
+# --------------------------------------------------------------------------
+# TLS verification failures fail fast; retry waits are reported
+# --------------------------------------------------------------------------
+
+
+class _FakePool:
+    host = "cdd.example.test"
+
+
+def test_certificate_verification_errors_are_never_retried() -> None:
+    governor = _FakeGovernor()
+    retry: http_module._GovernedRetry = http_module._build_retry(governor)  # type: ignore[arg-type]
+    cert_error = ssl.SSLCertVerificationError(1, "certificate verify failed: self-signed")
+    wrapped = urllib3.exceptions.SSLError(cert_error)  # how urllib3 hands it over
+
+    with pytest.raises(TlsVerificationError) as info:
+        retry.increment(method="GET", url="/x", error=wrapped, _pool=_FakePool())  # type: ignore[arg-type]
+
+    message = str(info.value)
+    assert "cdd.example.test" in message
+    assert "--ca-bundle" in message
+    assert info.value.__cause__ is wrapped
+
+
+def test_other_tls_errors_are_still_retried() -> None:
+    governor = _FakeGovernor()
+    retry: http_module._GovernedRetry = http_module._build_retry(governor)  # type: ignore[arg-type]
+    transient = urllib3.exceptions.SSLError(ssl.SSLEOFError(8, "EOF occurred in violation"))
+
+    new_retry = retry.increment(method="GET", url="/x", error=transient, _pool=_FakePool())  # type: ignore[arg-type]
+
+    assert isinstance(new_retry, http_module._GovernedRetry)
+
+
+def test_retry_backoff_and_retry_after_waits_are_reported_to_the_governor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+    governor = _FakeGovernor()
+    retry: http_module._GovernedRetry = http_module._build_retry(governor)  # type: ignore[arg-type]
+
+    with_header = _FakeWireResponse(status=503, headers={"Retry-After": "7"})
+    retry = retry.increment(method="GET", url="/", response=with_header, _pool=None)
+    retry.sleep(with_header)
+
+    plain = _FakeWireResponse(status=500)
+    retry = retry.increment(method="GET", url="/", response=plain, _pool=None)
+    retry.sleep(plain)  # 2nd consecutive error: backoff 2.0 * 2**1 = 4s
+
+    assert governor.pauses == [
+        (7.0, PauseReason.retry_backoff, 503),
+        (4.0, PauseReason.retry_backoff, 500),
+    ]
+    assert slept == [7.0, 4.0]

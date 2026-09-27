@@ -25,7 +25,16 @@ from ..models import CollectionInfo
 from ..settings import Settings
 
 _F = TypeVar("_F", bound=Callable[..., Any])
-_err_console = Console(stderr=True)
+
+#: THE stderr console. Log records, captured Python warnings, error messages
+#: and ``download``'s live progress display all go through this one object:
+#: rich can only keep a live display intact for output that is printed via
+#: the console the display runs on. A second ``Console(stderr=True)``
+#: writes straight to the real stderr, underneath the live region, and
+#: every refresh then leaves a stale copy of the progress bars behind
+#: (the "same finished line repeated many times" symptom).
+err_console = Console(stderr=True)
+_err_console = err_console
 
 #: Unofficial-client disclaimer, required (verbatim, per docs/PLAN.md) on
 #: every top-level --help and every command's --help.
@@ -115,7 +124,7 @@ def configure_logging(*, verbose: bool) -> None:
     """
 
     handler = RichHandler(
-        console=Console(stderr=True),
+        console=err_console,
         show_time=False,
         show_path=False,
         markup=False,
@@ -127,6 +136,14 @@ def configure_logging(*, verbose: bool) -> None:
         format="%(message)s",
         force=True,
     )
+    # Python warnings (e.g. anything urllib3 might warn about) go through
+    # logging -> the shared console too, instead of being written raw to
+    # stderr underneath a live progress display.
+    logging.captureWarnings(True)
+    # urllib3 logs every retry at WARNING ("Retrying (Retry(total=4...))").
+    # cddpt reports those waits itself (governor pause listener -> status
+    # line), so only show urllib3's own lines with --verbose.
+    logging.getLogger("urllib3").setLevel(logging.WARNING if verbose else logging.ERROR)
 
 
 def human_size(num_bytes: int | float | None) -> str:
@@ -276,6 +293,7 @@ __all__ = [
     "build_settings",
     "configure_logging",
     "describe_error",
+    "err_console",
     "get_state",
     "handle_errors",
     "human_size",

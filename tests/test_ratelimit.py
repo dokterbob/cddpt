@@ -11,7 +11,13 @@ import threading
 
 import pytest
 
-from cddpt.ratelimit import CircuitBreaker, RequestGovernor, ResponseLike
+from cddpt.ratelimit import (
+    CircuitBreaker,
+    GovernorPause,
+    PauseReason,
+    RequestGovernor,
+    ResponseLike,
+)
 from cddpt.settings import Settings
 
 
@@ -346,3 +352,101 @@ def test_acquire_is_thread_safe_under_concurrent_callers() -> None:
 
     assert not errors
     assert all(not t.is_alive() for t in threads)
+
+
+# --------------------------------------------------------------------------
+# Observability: pause listeners + run stats (long waits must never be silent)
+# --------------------------------------------------------------------------
+
+
+class _RecordingListener:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, GovernorPause]] = []
+
+    def on_pause(self, pause: GovernorPause) -> None:
+        self.events.append(("pause", pause))
+
+    def on_resume(self, pause: GovernorPause) -> None:
+        self.events.append(("resume", pause))
+
+
+def test_breaker_wait_is_reported_to_listeners_and_counted() -> None:
+    clock = FakeClock()
+    governor = RequestGovernor(clock=clock.now, sleep=clock.sleep)
+    listener = _RecordingListener()
+    governor.add_pause_listener(listener)
+
+    for _ in range(5):
+        governor.observe(_as_response_like(FakeResponse(429)))
+    governor.acquire()
+
+    assert [kind for kind, _ in listener.events] == ["pause", "resume"]
+    pause = listener.events[0][1]
+    assert listener.events[1][1] is pause
+    assert pause.reason is PauseReason.circuit_breaker
+    assert pause.seconds == pytest.approx(600.0)
+
+    stats = governor.stats()
+    assert stats.throttled_responses == 5
+    assert stats.breaker_trips == 1
+    assert stats.paused_seconds == pytest.approx(600.0)
+
+
+def test_retry_after_wait_is_reported_with_its_reason() -> None:
+    clock = FakeClock()
+    governor = RequestGovernor(clock=clock.now, sleep=clock.sleep)
+    listener = _RecordingListener()
+    governor.add_pause_listener(listener)
+
+    governor.observe(_as_response_like(FakeResponse(429, {"Retry-After": "42"})))
+    governor.acquire()
+
+    (kind, pause), _ = listener.events
+    assert kind == "pause"
+    assert pause.reason is PauseReason.retry_after
+    assert pause.seconds == pytest.approx(42.0)
+    assert governor.stats().paused_seconds == pytest.approx(42.0)
+
+
+def test_token_bucket_pacing_is_not_reported_as_a_pause() -> None:
+    clock = FakeClock()
+    governor = RequestGovernor(clock=clock.now, sleep=clock.sleep)
+    listener = _RecordingListener()
+    governor.add_pause_listener(listener)
+
+    for _ in range(10):
+        governor.acquire()
+
+    assert listener.events == []
+    assert governor.stats().paused_seconds == 0.0
+
+
+def test_overlapping_pauses_are_counted_once_in_paused_seconds() -> None:
+    clock = FakeClock()
+    governor = RequestGovernor(clock=clock.now, sleep=clock.sleep)
+
+    with governor.pausing(10.0, PauseReason.retry_backoff):
+        clock.advance(5.0)
+        with governor.pausing(10.0, PauseReason.retry_backoff):
+            clock.advance(10.0)
+    clock.advance(100.0)  # not paused
+
+    assert governor.stats().paused_seconds == pytest.approx(15.0)
+
+
+def test_a_failing_listener_never_breaks_the_request_path() -> None:
+    class Broken:
+        def on_pause(self, pause: GovernorPause) -> None:
+            raise RuntimeError("ui bug")
+
+        def on_resume(self, pause: GovernorPause) -> None:
+            raise RuntimeError("ui bug")
+
+    clock = FakeClock()
+    governor = RequestGovernor(clock=clock.now, sleep=clock.sleep)
+    governor.add_pause_listener(Broken())
+    governor.observe(_as_response_like(FakeResponse(503, {"Retry-After": "3"})))
+
+    governor.acquire()  # must not raise
+
+    governor.remove_pause_listener(Broken())  # unknown listener: no-op

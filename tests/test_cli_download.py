@@ -13,20 +13,25 @@ with ``responses``, exactly as in ``test_download.py``.
 
 from __future__ import annotations
 
+import io
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pystac
 import pytest
 import responses
 from responses import matchers
+from rich.console import Console
 from typer.testing import CliRunner
 
 from cddpt.auth.store import CredentialStore
 from cddpt.catalog import CddCatalog
 from cddpt.cli import _common
+from cddpt.cli import download as download_cli
 from cddpt.cli.app import app
-from cddpt.models import AssetRef, CollectionInfo
+from cddpt.models import AssetRef, CollectionInfo, DownloadOutcome, DownloadStatus
+from cddpt.ratelimit import GovernorPause, GovernorStats, PauseReason
 
 FIXTURES = Path(__file__).parent / "fixtures" / "auth"
 
@@ -405,6 +410,7 @@ def test_download_yes_flow_with_keyring_unavailable_and_env_creds(
     assert result.exit_code == _common.EXIT_OK, result.stderr
     assert "keyring unavailable" in result.stderr
     assert "downloaded" in result.stdout.lower() or "Download summary" in result.stdout
+    assert "Server throttling: none observed" in result.stdout
 
     dest = tmp_path / "MDT-2m" / "MDT-2m-111195-07-2024.tif"
     assert dest.is_file()
@@ -486,3 +492,110 @@ def test_download_auth_failure_exits_3(
     )
 
     assert result.exit_code == _common.EXIT_AUTH_FAILURE, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Live display: pause status line, finished bars removed, throttling summary
+# ---------------------------------------------------------------------------
+
+
+def _pause(reason: PauseReason, seconds: float, status: int | None = None) -> GovernorPause:
+    return GovernorPause(
+        pause_id=int(seconds * 1000) + list(PauseReason).index(reason),
+        reason=reason,
+        seconds=seconds,
+        resume_at=datetime.now(timezone.utc) + timedelta(seconds=seconds),
+        status=status,
+    )
+
+
+def _plain(renderable: object) -> str:
+    console = Console(width=300, record=True, file=io.StringIO())
+    console.print(renderable)
+    return console.export_text()
+
+
+def test_pause_status_shows_the_most_severe_pause_with_a_countdown() -> None:
+    status = download_cli._PauseStatus()
+    assert status.renderable() is None
+
+    backoff = _pause(PauseReason.retry_backoff, 8.0, status=503)
+    breaker = _pause(PauseReason.circuit_breaker, 600.0)
+    status.on_pause(backoff)
+    assert "Retrying after HTTP 503" in _plain(status.renderable())
+
+    status.on_pause(breaker)
+    text = _plain(status.renderable())
+    assert "Circuit breaker open" in text
+    assert "all requests paused until" in text
+    assert re.search(r"in (9:5\d|10:00)", text), text
+
+    status.on_resume(breaker)
+    status.on_resume(backoff)
+    assert status.renderable() is None
+
+
+def test_pause_status_ignores_short_pauses() -> None:
+    status = download_cli._PauseStatus()
+    status.on_pause(_pause(PauseReason.retry_backoff, 0.5))
+    assert status.renderable() is None
+
+
+def test_pause_status_retry_after_message() -> None:
+    status = download_cli._PauseStatus()
+    status.on_pause(_pause(PauseReason.retry_after, 42.0))
+    assert "Rate limited by the server (Retry-After)" in _plain(status.renderable())
+
+
+def test_rich_progress_removes_finished_bars_and_counts_files(tmp_path: Path) -> None:
+    console = Console(file=io.StringIO(), width=200)
+    progress = download_cli._RichProgress(console=console)
+    progress.start_run(2, 2000)
+    first = _asset(item_id="A", size_bytes=1000)
+    second = _asset(item_id="B", size_bytes=1000)
+
+    progress.on_start(first, 1000)
+    progress.on_start(second, 1000)
+    progress.on_progress(first, 1000)
+    progress.on_done(
+        DownloadOutcome(
+            asset=first,
+            dest=tmp_path / "A.tif",
+            status=DownloadStatus.downloaded,
+            bytes_transferred=1000,
+            storage_filename="A.tif",
+            error=None,
+        )
+    )
+
+    names = [task.fields["name"] for task in progress._progress.tasks]
+    assert names == ["Total (1/2 files)", "B"]
+    overall = progress._progress.tasks[0]
+    assert overall.completed == 1000
+
+
+def test_throttling_summary_reports_counts_and_paused_time(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    download_cli._print_throttling(
+        GovernorStats(throttled_responses=7, breaker_trips=1, paused_seconds=612.0)
+    )
+    out = capsys.readouterr().out
+    assert "7 HTTP 429/503 response(s)" in out
+    assert "circuit breaker opened 1 time(s)" in out
+    assert "10:12 in total" in out
+
+
+def test_logging_and_live_display_share_one_console() -> None:
+    """Log records must go through the console the live display runs on, or
+    every refresh leaves a stale copy of the bars behind."""
+
+    import logging
+
+    from rich.logging import RichHandler
+
+    _common.configure_logging(verbose=False)
+    handlers = [h for h in logging.getLogger().handlers if isinstance(h, RichHandler)]
+    assert handlers and handlers[0].console is _common.err_console
+    assert download_cli._RichProgress()._progress.console is _common.err_console
+    assert download_cli._stderr is _common.err_console

@@ -34,6 +34,18 @@ class HttpError(CddError):
         self.url = url
 
 
+class TlsVerificationError(HttpError):
+    """A server's TLS certificate could not be verified (or, defensively, a
+    connection turned out not to be verified at all).
+
+    Never retried: a certificate problem does not fix itself with backoff.
+    The usual legitimate cause is a TLS-inspecting corporate proxy whose CA
+    is not in the OS trust store -- pass it via ``ca_bundle``
+    (``--ca-bundle`` / ``CDDPT_CA_BUNDLE``). cddpt never offers a way to
+    disable verification.
+    """
+
+
 class ApiError(CddError):
     """The API returned a response that did not match the expected shape.
 
