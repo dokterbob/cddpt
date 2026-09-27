@@ -19,11 +19,24 @@ Status: early development — see the roadmap below.
 
 AGPL-3.0-or-later — see [LICENSE](LICENSE).
 
+## Installing
+
+Not yet on PyPI (planned for milestone 6 — see [docs/roadmap.md](docs/roadmap.md)), so
+install straight from git with [uv](https://docs.astral.sh/uv/):
+
+```sh
+uv tool install 'cddpt[cli,files] @ git+https://github.com/dokterbob/cddpt'
+
+# later, to pick up new commits:
+uv tool upgrade cddpt
+
+# or run it once without installing:
+uvx --from 'cddpt[cli,files] @ git+https://github.com/dokterbob/cddpt' cddpt --help
+```
+
 ## Quick start (anonymous search — no account needed)
 
 ```sh
-uv tool install 'cddpt[cli,files]'   # or: pip install 'cddpt[cli,files]'
-
 cddpt collections list
 cddpt search --aoi my_area.geojson --collection MDT-2m --estimate-only
 cddpt search --bbox -9.15,38.70,-9.13,38.72 --collection LAZ --output tiles.geojson
@@ -39,3 +52,13 @@ cddpt download --aoi my_area.geojson --collection MDT-2m --out ./data --manifest
 
 Downloads resume where they left off and skip files already present. Rate limits are
 deliberately conservative — large areas can take hours to days.
+
+## Development
+
+```sh
+git clone https://github.com/dokterbob/cddpt.git
+cd cddpt
+uv sync            # installs the cli/files extras too, via the dev dependency group
+uv run cddpt --help
+uv run pytest
+```
