@@ -90,6 +90,15 @@ def _isolate_cddpt_credential_env_vars(
     monkeypatch.delenv("CDDPT_PASSWORD", raising=False)
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Keep CLI output free of ANSI styling regardless of the caller's
+    environment: rich honours ``FORCE_COLOR`` even under ``CliRunner``, and
+    the CLI modules build their ``Console`` objects at import time -- so this
+    must happen before any test module is imported, not in a fixture."""
+
+    os.environ.pop("FORCE_COLOR", None)
+
+
 # ---------------------------------------------------------------------------
 # Milestone 4 (auth): a tiny in-memory keyring backend for offline tests.
 #
