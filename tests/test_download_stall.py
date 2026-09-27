@@ -116,7 +116,7 @@ def test_stalled_stream_is_dropped_and_resumed_with_range(
     settings = Settings(ca_bundle=_CERT, stall_timeout=0.5)
     governor = RequestGovernor(requests_per_second=1000.0, burst=1000)
     catalog = CddCatalog(settings=settings, governor=governor)
-    auth = AuthManager(settings=settings, provider=_NoAuthProvider(), store=None)
+    auth = AuthManager(settings=settings, provider=_NoAuthProvider())
     downloader = Downloader(
         catalog,
         auth,

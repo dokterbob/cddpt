@@ -5,11 +5,12 @@ Protocol, the :class:`AuthManager` facade, and :func:`is_login_redirect`.
 touches** -- callers never read/write cookies or talk to a provider
 directly. It:
 
-- caches one :class:`AuthSession` in memory;
-- falls back to a caller-supplied :class:`SessionStore` (typically
-  :class:`cddpt.auth.store.CredentialStore`) for a still-valid session
-  persisted from a previous process, when the in-memory cache is empty or
-  stale;
+- caches one :class:`AuthSession` **in memory only**, for the lifetime of
+  this ``AuthManager`` (i.e. one process) -- the CDD session cookie is a
+  short-lived credential (30-minute absolute expiry, no rolling; see
+  docs/PLAN.md's Auth design), so cddpt never persists it across
+  invocations. Each CLI invocation logs in once, lazily, the first time it's
+  needed;
 - otherwise asks its :class:`AuthProvider` to (re-)authenticate, proactively
   -- i.e. *before* a session actually expires, once fewer than
   ``refresh_margin`` remains (docs/PLAN.md: "refresh proactively with a
@@ -20,18 +21,10 @@ directly. It:
   at once trigger exactly *one* real re-authentication, not one per thread
   (see :meth:`on_unauthorized`'s docstring for the exact mechanism).
 
-Why ``AuthManager`` doesn't own a real, persistent store by default
----------------------------------------------------------------------
-``store`` is a small :class:`SessionStore` Protocol, not a concrete
-:class:`~cddpt.auth.store.CredentialStore` -- and defaults to ``None``
-(in-memory-only caching for the lifetime of this ``AuthManager``, never
-touching the keyring). This is also exactly the mechanism behind
-``cddpt auth login --no-save``: the CLI passes ``store=None`` in that case,
-and a real ``CredentialStore()`` otherwise. Keeping the dependency this way
-round (rather than ``AuthManager`` importing and default-constructing
-``cddpt.auth.store.CredentialStore`` itself) also avoids a base.py <->
-store.py import cycle, since ``store.py`` needs ``AuthSession`` from this
-module.
+The long-lived credential (username + password) is a separate concern,
+handled entirely by :class:`~cddpt.auth.form_provider.KeycloakFormAuthProvider`
+and :class:`~cddpt.auth.store.CredentialStore` -- that's what makes
+unattended re-login work, and it's the only thing ``keyring`` is used for.
 
 Why ``refresh()`` (not ``authenticate()``) is used to recover a dead session
 -------------------------------------------------------------------------------
@@ -54,10 +47,10 @@ surface correctly.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import Protocol
 from urllib.parse import urlsplit
 
 import requests
@@ -121,25 +114,6 @@ class AuthSession:
         current = now if now is not None else utcnow()
         return current >= (self.expires_at - margin)
 
-    def to_json_dict(self) -> dict[str, Any]:
-        """A JSON-safe representation for :class:`~cddpt.auth.store.CredentialStore`."""
-
-        return {
-            "cookies": dict(self.cookies),
-            "obtained_at": self.obtained_at.isoformat(),
-            "expires_at": self.expires_at.isoformat(),
-            "source": self.source,
-        }
-
-    @classmethod
-    def from_json_dict(cls, data: Mapping[str, Any]) -> AuthSession:
-        return cls(
-            cookies=dict(data["cookies"]),
-            obtained_at=datetime.fromisoformat(data["obtained_at"]),
-            expires_at=datetime.fromisoformat(data["expires_at"]),
-            source=str(data["source"]),
-        )
-
 
 class AuthProvider(Protocol):
     """How :class:`AuthManager` obtains/renews/discards an :class:`AuthSession`.
@@ -165,22 +139,6 @@ class AuthProvider(Protocol):
     def invalidate(self) -> None:
         """Drop any provider-local cached state (not the stored
         credentials themselves) -- called before a forced re-auth."""
-
-
-class SessionStore(Protocol):
-    """The minimal persistence surface :class:`AuthManager` needs.
-
-    :class:`~cddpt.auth.store.CredentialStore` satisfies this (and does
-    more: credential storage, keyring backend introspection, etc.) -- kept
-    as a narrow Protocol here so ``base.py`` never needs to import
-    ``store.py`` (see this module's docstring).
-    """
-
-    def load_session(self) -> AuthSession | None: ...
-
-    def save_session(self, session: AuthSession) -> None: ...
-
-    def clear_session(self) -> None: ...
 
 
 def is_login_redirect(response: requests.Response) -> bool:
@@ -217,13 +175,11 @@ class AuthManager:
         *,
         settings: Settings,
         provider: AuthProvider,
-        store: SessionStore | None = None,
         clock: ClockFn = utcnow,
         refresh_margin: timedelta = timedelta(minutes=3),
     ) -> None:
         self._settings = settings
         self._provider = provider
-        self._store = store
         self._clock = clock
         self._refresh_margin = refresh_margin
         self._session: AuthSession | None = None
@@ -234,8 +190,8 @@ class AuthManager:
         return self._provider
 
     def current(self) -> AuthSession:
-        """The current, still-valid (with margin) session -- from cache, the
-        store, or a fresh provider call, in that order."""
+        """The current, still-valid (with margin) session -- from the
+        in-memory cache, or a fresh provider call."""
 
         with self._lock:
             return self._current_locked()
@@ -282,8 +238,6 @@ class AuthManager:
 
             target = current if current is not None else failed_session
             self._provider.invalidate()
-            if self._store is not None:
-                self._store.clear_session()
             self._session = None
 
             new_session = (
@@ -298,12 +252,7 @@ class AuthManager:
         if self._session is not None and not self._is_stale(self._session):
             return self._session
 
-        stored = self._store.load_session() if self._store is not None else None
-        if stored is not None and not self._is_stale(stored):
-            self._session = stored
-            return stored
-
-        base_session = self._session if self._session is not None else stored
+        base_session = self._session
         new_session = (
             self._provider.refresh(base_session)
             if base_session is not None
@@ -317,8 +266,6 @@ class AuthManager:
 
     def _set_session(self, session: AuthSession) -> None:
         self._session = session
-        if self._store is not None:
-            self._store.save_session(session)
 
 
 __all__ = [
@@ -327,7 +274,6 @@ __all__ = [
     "AuthProvider",
     "AuthSession",
     "ClockFn",
-    "SessionStore",
     "is_login_redirect",
     "utcnow",
 ]

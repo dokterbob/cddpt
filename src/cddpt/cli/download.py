@@ -12,6 +12,7 @@ behind a rich progress display -- no STAC/HTTP/download logic lives here.
 
 from __future__ import annotations
 
+import getpass
 import threading
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -21,6 +22,7 @@ from types import TracebackType
 from typing import Annotated, Any
 
 import typer
+from pydantic import SecretStr
 from rich.console import Console, RenderableType
 from rich.panel import Panel
 from rich.progress import (
@@ -36,8 +38,9 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
-from ..auth.base import AuthManager
+from ..auth.base import AuthManager, AuthProvider
 from ..auth.form_provider import KeycloakFormAuthProvider
+from ..auth.manual_provider import ManualCookieAuthProvider
 from ..auth.store import CredentialStore
 from ..catalog import CddCatalog
 from ..download import Downloader, DownloadPlan
@@ -80,41 +83,42 @@ def _layout_for(choice: LayoutChoice) -> Layout:
     return FlatLayout()
 
 
-def _build_auth_manager(settings: Settings, governor: RequestGovernor) -> AuthManager:
+def _build_auth_manager(
+    settings: Settings, governor: RequestGovernor, *, cookie: SecretStr | None = None
+) -> AuthManager:
     """Resolve the :class:`~cddpt.auth.base.AuthManager` `download`
     authenticates the CDD-host token exchange with.
+
+    The CDD session itself is never persisted -- see
+    ``cddpt.auth.base``'s module docstring -- so there is nothing here to
+    degrade gracefully around beyond credential *resolution*: a manually
+    supplied ``cookie`` (from ``--cookie`` or ``CDDPT_SESSION_COOKIE``) wins
+    outright; otherwise this falls back to username/password.
 
     The :class:`~cddpt.auth.form_provider.KeycloakFormAuthProvider` shares
     *this run's one* ``governor`` (never builds its own) so login traffic is
     paced by the exact same budget as search/exchange/transfer traffic.
 
-    Degrades gracefully when the system keyring is unavailable (e.g. a
-    locked macOS keychain -- see docs/PLAN.md's SECRETS note) but
-    ``CDDPT_USERNAME``/``CDDPT_PASSWORD`` are set: warns on stderr and
-    continues with an in-memory-only session (nothing persisted) instead of
-    failing outright. Without env credentials, a broken keyring is a real
-    failure (there is no other way to resolve credentials) and propagates
-    as :class:`~cddpt.errors.AuthError`.
+    ``CDDPT_USERNAME``/``CDDPT_PASSWORD`` work even when the system keyring
+    is unavailable (e.g. a locked macOS keychain -- see docs/PLAN.md's
+    SECRETS note): the keyring is only consulted when env credentials are
+    absent, so it's never touched in that case. Without env credentials, a
+    broken keyring is a real failure (there is no other way to resolve
+    credentials) and propagates as :class:`~cddpt.errors.AuthError`.
     """
 
-    store: CredentialStore | None
-    try:
-        candidate_store = CredentialStore()
-        candidate_store.get_username()  # cheap read -- probes keyring availability
-        store = candidate_store
-    except AuthError as exc:
-        if settings.username is not None and settings.password is not None:
-            _stderr.print(
-                f"[yellow]warning:[/yellow] system keyring unavailable ({exc}); "
-                "continuing without persisting the session (using "
-                "CDDPT_USERNAME/CDDPT_PASSWORD only)."
-            )
-            store = None
-        else:
-            raise
+    manual_cookie = cookie if cookie is not None else settings.session_cookie
+    if manual_cookie is not None:
+        provider: AuthProvider = ManualCookieAuthProvider(cookie_value=manual_cookie)
+        return AuthManager(settings=settings, provider=provider)
+
+    store: CredentialStore | None = None
+    if settings.username is None or settings.password is None:
+        store = CredentialStore()
+        store.get_username()  # cheap read -- raises AuthError if keyring is unusable
 
     provider = KeycloakFormAuthProvider(settings=settings, governor=governor, store=store)
-    return AuthManager(settings=settings, provider=provider, store=store)
+    return AuthManager(settings=settings, provider=provider)
 
 
 def _format_remaining(seconds: float) -> str:
@@ -437,6 +441,16 @@ def download_command(
             "--yes", help="Skip the confirmation prompt for a large (>5 GB) remaining download."
         ),
     ] = False,
+    cookie: Annotated[
+        bool,
+        typer.Option(
+            "--cookie",
+            help="Authenticate with a pasted browser 'connect.sid' cookie instead of "
+            "username/password (prompted, hidden -- never a CLI argument). A per-run "
+            "input: the session is never persisted, so this cookie is used for this "
+            "invocation only. See also CDDPT_SESSION_COOKIE.",
+        ),
+    ] = False,
 ) -> None:
     the_aoi = _common.build_aoi(bbox, aoi, wkt)
     collection_ids = list(collection)
@@ -458,7 +472,14 @@ def download_command(
         f"chunk(s) (max {effective_chunk_km2:g} km²/chunk)"
     )
 
-    auth_manager = _build_auth_manager(settings, governor)
+    manual_cookie: SecretStr | None = None
+    if cookie:
+        raw_cookie = getpass.getpass("Paste your 'connect.sid' cookie value (input hidden): ")
+        if not raw_cookie:
+            raise AuthError("cddpt: no cookie value entered.")
+        manual_cookie = SecretStr(raw_cookie)
+
+    auth_manager = _build_auth_manager(settings, governor, cookie=manual_cookie)
     progress = _RichProgress()
     downloader = Downloader(catalog, auth_manager, settings, governor=governor, progress=progress)
 

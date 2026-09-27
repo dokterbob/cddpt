@@ -182,7 +182,7 @@ def _auth_session(cookie_value: str) -> AuthSession:
 
 
 def _auth_manager(provider: AuthProvider) -> AuthManager:
-    return AuthManager(settings=_settings(), provider=provider, store=None)
+    return AuthManager(settings=_settings(), provider=provider)
 
 
 def _simple_auth_manager(cookie_value: str = "sentinel-sid") -> AuthManager:

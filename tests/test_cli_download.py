@@ -25,7 +25,6 @@ from responses import matchers
 from rich.console import Console
 from typer.testing import CliRunner
 
-from cddpt.auth.store import CredentialStore
 from cddpt.catalog import CddCatalog
 from cddpt.cli import _common
 from cddpt.cli import download as download_cli
@@ -367,12 +366,13 @@ def test_download_declining_large_confirmation_aborts_cleanly(
 
 # ---------------------------------------------------------------------------
 # --yes end-to-end flow, WITH the keyring unavailable but env creds present
-# -- must degrade gracefully (warn, continue) rather than fail (SECRETS note).
+# -- env credentials never touch the keyring at all, so a broken keyring
+# backend must not matter.
 # ---------------------------------------------------------------------------
 
 
 @responses.activate
-def test_download_yes_flow_with_keyring_unavailable_and_env_creds(
+def test_download_yes_flow_with_broken_keyring_and_env_creds(
     runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -408,18 +408,12 @@ def test_download_yes_flow_with_keyring_unavailable_and_env_creds(
     )
 
     assert result.exit_code == _common.EXIT_OK, result.stderr
-    assert "keyring unavailable" in result.stderr
     assert "downloaded" in result.stdout.lower() or "Download summary" in result.stdout
     assert "Server throttling: none observed" in result.stdout
 
     dest = tmp_path / "MDT-2m" / "MDT-2m-111195-07-2024.tif"
     assert dest.is_file()
     assert dest.read_bytes() == b"x" * 1000
-
-    # Never persisted -- the session store degraded to in-memory-only.
-    store = CredentialStore()
-    with pytest.raises(Exception):  # noqa: B017 -- no_keyring_backend: any keyring op fails
-        store.load_session()
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +469,34 @@ def test_download_auth_failure_exits_3(
     # No credentials at all, and the keyring (fake, empty -- never the real
     # OS keyring) has none stored either -- KeycloakFormAuthProvider's
     # authenticate() must raise AuthError.
+
+    result = runner.invoke(
+        app,
+        [
+            "download",
+            "--out",
+            str(tmp_path),
+            "--bbox",
+            _LISBON_BBOX,
+            "--collection",
+            "MDT-2m",
+            "--yes",
+        ],
+        env=_FAST_ENV,
+    )
+
+    assert result.exit_code == _common.EXIT_AUTH_FAILURE, result.stderr
+
+
+def test_download_broken_keyring_without_env_creds_exits_3(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_keyring_backend: object
+) -> None:
+    """No env credentials and a genuinely broken keyring backend -- the only
+    other way to resolve credentials -- must be a clear AuthError (exit 3),
+    not a silent degrade."""
+
+    asset = _asset(size_bytes=4)
+    _patch_catalog(monkeypatch, assets=[asset])
 
     result = runner.invoke(
         app,

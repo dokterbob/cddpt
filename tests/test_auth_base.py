@@ -1,9 +1,8 @@
 """Tests for cddpt.auth.base: AuthSession, is_login_redirect, and
 AuthManager's caching/expiry/proactive-refresh/thread-safety/cookie-scoping.
 
-Fully offline -- no real HTTP, no real keyring backend needed (AuthManager's
-``store`` here is always a tiny in-memory fake, not
-:class:`cddpt.auth.store.CredentialStore`).
+Fully offline -- no real HTTP, no real keyring backend needed: AuthManager
+caches its session purely in memory and never touches a store of any kind.
 """
 
 from __future__ import annotations
@@ -60,13 +59,6 @@ def test_auth_session_repr_never_contains_cookie_values() -> None:
     session = _session(obtained_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
     assert "sentinel-cookie-value" not in repr(session)
     assert "sentinel-cookie-value" not in str(session)
-
-
-def test_auth_session_json_roundtrip() -> None:
-    obtained = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    original = _session(obtained_at=obtained, source="manual")
-    restored = AuthSession.from_json_dict(original.to_json_dict())
-    assert restored == original
 
 
 # ---------------------------------------------------------------------------
@@ -172,29 +164,10 @@ class _FakeProvider:
             self.invalidate_calls += 1
 
 
-class _FakeStore:
-    """A minimal SessionStore double."""
-
-    def __init__(self) -> None:
-        self._session: AuthSession | None = None
-
-    def load_session(self) -> AuthSession | None:
-        return self._session
-
-    def save_session(self, session: AuthSession) -> None:
-        self._session = session
-
-    def clear_session(self) -> None:
-        self._session = None
-
-
-def _manager(
-    *, clock: list[datetime], provider: _FakeProvider, store: _FakeStore | None = None
-) -> AuthManager:
+def _manager(*, clock: list[datetime], provider: _FakeProvider) -> AuthManager:
     return AuthManager(
         settings=Settings(),
         provider=provider,  # type: ignore[arg-type]
-        store=store,  # type: ignore[arg-type]
         clock=lambda: clock[0],
         refresh_margin=timedelta(minutes=3),
     )
@@ -241,53 +214,6 @@ def test_current_proactively_refreshes_within_margin() -> None:
     assert provider.authenticate_calls == 1
     assert provider.refresh_calls == 1
     assert second.cookies["connect.sid"] == "refreshed-1"
-
-
-def test_current_falls_back_to_valid_stored_session() -> None:
-    clock = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
-    provider = _FakeProvider(clock=clock)
-    store = _FakeStore()
-    stored = AuthSession(
-        cookies={"connect.sid": "from-store"},
-        obtained_at=clock[0],
-        expires_at=clock[0] + SESSION_TTL,
-        source="manual",
-    )
-    store.save_session(stored)
-    manager = _manager(clock=clock, provider=provider, store=store)
-
-    session = manager.current()
-    assert session == stored
-    assert provider.authenticate_calls == 0
-
-
-def test_current_ignores_expired_stored_session() -> None:
-    clock = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
-    provider = _FakeProvider(clock=clock)
-    store = _FakeStore()
-    stale = AuthSession(
-        cookies={"connect.sid": "stale"},
-        obtained_at=clock[0] - SESSION_TTL - timedelta(minutes=1),
-        expires_at=clock[0] - timedelta(minutes=1),
-        source="manual",
-    )
-    store.save_session(stale)
-    manager = _manager(clock=clock, provider=provider, store=store)
-
-    session = manager.current()
-    # A stale-but-present stored session is handed to refresh(), not authenticate().
-    assert provider.refresh_calls == 1
-    assert session.cookies["connect.sid"] != "stale"
-
-
-def test_current_persists_new_session_to_store() -> None:
-    clock = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
-    provider = _FakeProvider(clock=clock)
-    store = _FakeStore()
-    manager = _manager(clock=clock, provider=provider, store=store)
-
-    session = manager.current()
-    assert store.load_session() == session
 
 
 # ---------------------------------------------------------------------------

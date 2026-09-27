@@ -11,7 +11,6 @@ autouse ``_isolate_cddpt_credential_env_vars`` fixture in conftest.py.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -19,7 +18,6 @@ import responses
 from pydantic import SecretStr
 from typer.testing import CliRunner
 
-from cddpt.auth.base import AuthSession
 from cddpt.auth.store import CredentialStore
 from cddpt.cli import _common
 from cddpt.cli.app import app
@@ -139,7 +137,6 @@ def test_login_with_env_credentials_succeeds_and_persists(
 
     store = CredentialStore()
     assert store.get_username() == "alice@example.test"
-    assert store.load_session() is not None
 
 
 @responses.activate
@@ -175,52 +172,6 @@ def test_login_no_save_does_not_persist_credentials(
     assert result.exit_code == _common.EXIT_OK, result.stderr
     store = CredentialStore()
     assert store.get_username() is None
-    assert store.load_session() is None
-
-
-@responses.activate
-def test_login_cookie_flow(
-    runner: CliRunner, fake_keyring: object, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        "cddpt.cli.auth.getpass.getpass", lambda prompt="": "pasted-connect-sid-value"
-    )
-
-    result = runner.invoke(app, ["auth", "login", "--cookie"], env=_FAST_ENV)
-
-    assert result.exit_code == _common.EXIT_OK, result.stderr
-    assert "logged in" in result.stdout
-
-    store = CredentialStore()
-    stored_cookie = store.get_manual_cookie()
-    assert stored_cookie is not None
-    assert stored_cookie.get_secret_value() == "pasted-connect-sid-value"
-
-
-@responses.activate
-def test_login_cookie_flow_no_save(
-    runner: CliRunner, fake_keyring: object, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        "cddpt.cli.auth.getpass.getpass", lambda prompt="": "pasted-connect-sid-value"
-    )
-
-    result = runner.invoke(app, ["auth", "login", "--cookie", "--no-save"], env=_FAST_ENV)
-
-    assert result.exit_code == _common.EXIT_OK, result.stderr
-    store = CredentialStore()
-    assert store.get_manual_cookie() is None
-
-
-def test_login_empty_cookie_exits_with_auth_failure_code(
-    runner: CliRunner, fake_keyring: object, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("cddpt.cli.auth.getpass.getpass", lambda prompt="": "")
-
-    result = runner.invoke(app, ["auth", "login", "--cookie"], env=_FAST_ENV)
-
-    assert result.exit_code == _common.EXIT_AUTH_FAILURE
-    assert "Error" in result.stderr
 
 
 @responses.activate
@@ -245,68 +196,63 @@ def test_login_invalid_credentials_exits_with_auth_failure_code(
 # ---------------------------------------------------------------------------
 
 
-def test_status_with_no_cached_session(runner: CliRunner, fake_keyring: object) -> None:
+def test_status_reports_no_persisted_session(runner: CliRunner, fake_keyring: object) -> None:
+    # No cross-run session cache any more -- status must say so, never claim
+    # a cached/valid/expired session (there is none to report).
     result = runner.invoke(app, ["auth", "status"], env=_FAST_ENV)
     assert result.exit_code == _common.EXIT_OK, result.stderr
-    assert "none cached" in result.stdout
+    assert "not persisted" in result.stdout
 
 
-def test_status_with_valid_session(runner: CliRunner, fake_keyring: object) -> None:
-    store = CredentialStore()
-    now = datetime.now(timezone.utc)
-    store.save_session(
-        AuthSession(
-            cookies={"connect.sid": "x"},
-            obtained_at=now,
-            expires_at=now + timedelta(minutes=20),
-            source="form",
-        )
-    )
+def test_status_reports_none_configured_with_empty_keyring(
+    runner: CliRunner, fake_keyring: object
+) -> None:
+    result = runner.invoke(app, ["auth", "status"], env=_FAST_ENV)
+    assert result.exit_code == _common.EXIT_OK, result.stderr
+    assert "none configured" in result.stdout
+
+
+def test_status_reports_keyring_credential_source(runner: CliRunner, fake_keyring: object) -> None:
+    CredentialStore().set_username("alice@example.test")
 
     result = runner.invoke(app, ["auth", "status"], env=_FAST_ENV)
 
     assert result.exit_code == _common.EXIT_OK, result.stderr
-    assert "valid" in result.stdout
-    assert "form" in result.stdout
+    assert "keyring" in result.stdout
+    # Never the username/email itself.
+    assert "alice@example.test" not in result.stdout
 
 
-def test_status_with_expired_session(runner: CliRunner, fake_keyring: object) -> None:
-    store = CredentialStore()
-    now = datetime.now(timezone.utc)
-    store.save_session(
-        AuthSession(
-            cookies={"connect.sid": "x"},
-            obtained_at=now - timedelta(minutes=40),
-            expires_at=now - timedelta(minutes=10),
-            source="manual",
-        )
-    )
+def test_status_reports_env_credential_source(runner: CliRunner, fake_keyring: object) -> None:
+    env = {**_FAST_ENV, "CDDPT_USERNAME": "alice@example.test", "CDDPT_PASSWORD": "irrelevant"}
+    result = runner.invoke(app, ["auth", "status"], env=env)
 
-    result = runner.invoke(app, ["auth", "status"], env=_FAST_ENV)
     assert result.exit_code == _common.EXIT_OK, result.stderr
-    assert "expired" in result.stdout
+    assert "env" in result.stdout
+    assert "alice@example.test" not in result.stdout
 
 
-def test_status_never_prints_secret_cookie_value(runner: CliRunner, fake_keyring: object) -> None:
-    store = CredentialStore()
-    now = datetime.now(timezone.utc)
-    store.save_session(
-        AuthSession(
-            cookies={"connect.sid": "sentinel-should-never-print"},
-            obtained_at=now,
-            expires_at=now + timedelta(minutes=20),
-            source="form",
-        )
-    )
+def test_status_reports_session_cookie_env_credential_source(
+    runner: CliRunner, fake_keyring: object
+) -> None:
+    env = {**_FAST_ENV, "CDDPT_SESSION_COOKIE": "sentinel-should-never-print"}
+    result = runner.invoke(app, ["auth", "status"], env=env)
 
-    result = runner.invoke(app, ["auth", "status"], env=_FAST_ENV)
+    assert result.exit_code == _common.EXIT_OK, result.stderr
+    assert "CDDPT_SESSION_COOKIE" in result.stdout
     assert "sentinel-should-never-print" not in result.stdout
+
+
+def test_status_reports_keyring_backend(runner: CliRunner, fake_keyring: object) -> None:
+    result = runner.invoke(app, ["auth", "status"], env=_FAST_ENV)
+    assert result.exit_code == _common.EXIT_OK, result.stderr
+    assert "InMemoryKeyring" in result.stdout
 
 
 def test_status_reports_keyring_unavailable(runner: CliRunner, no_keyring_backend: object) -> None:
     result = runner.invoke(app, ["auth", "status"], env=_FAST_ENV)
     assert result.exit_code == _common.EXIT_AUTH_FAILURE
-    assert "unavailable" in result.stdout or "Error" in result.stderr
+    assert "Error" in result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +264,6 @@ def test_logout_purges_all_entries(runner: CliRunner, fake_keyring: object) -> N
     store = CredentialStore()
     store.set_username("alice@example.test")
     store.set_password("alice@example.test", SecretStr("x"))
-    store.set_manual_cookie(SecretStr("y"))
 
     result = runner.invoke(app, ["auth", "logout"], env=_FAST_ENV)
 

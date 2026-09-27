@@ -1,48 +1,41 @@
-"""Keyring-backed storage for cddpt's CDD credentials and current session.
+"""Keyring-backed storage for cddpt's long-lived CDD credential (username +
+password).
 
-Service name: ``"cddpt"`` (keyring's ``service_name``). Four kinds of entry,
-all under that one service:
+Service name: ``"cddpt"`` (keyring's ``service_name``). Two kinds of entry,
+both under that one service:
 
 - ``username`` -- a fixed keyring "username" slot holding the CDD account's
   username/email.
 - the password for that username -- keyring's own data model is
   ``(service, username) -> password``, so the password is naturally stored
   keyed by whatever username was last set via :meth:`CredentialStore.set_username`.
-- ``manual-cookie`` -- a fixed slot holding a pasted ``connect.sid`` value
-  for :class:`~cddpt.auth.manual_provider.ManualCookieAuthProvider`, kept
-  distinct from the real account's password entry.
-- ``session`` -- a fixed slot holding the current
-  :class:`~cddpt.auth.base.AuthSession`, JSON-encoded (cookie values +
-  timestamps + source).
+
+The CDD session cookie itself is **never** stored here (or anywhere else):
+it's a short-lived credential (30-minute absolute expiry, no rolling -- see
+docs/PLAN.md's Auth design) that :class:`~cddpt.auth.base.AuthManager` keeps
+in memory only, for the lifetime of one process. Keyring holds only the
+long-lived secret that makes unattended re-login possible.
 
 Never any plaintext file fallback. If the keyring is unusable (no backend
 configured, locked, or similar --
 :class:`keyring.errors.KeyringError`/:class:`~keyring.errors.NoKeyringError`),
 every method here raises a clear :class:`~cddpt.errors.AuthError` explaining
-the options (env vars, ``--cookie``, or fixing the keyring backend) rather
-than silently degrading to disk.
+the options (env vars, a session cookie, or fixing the keyring backend)
+rather than silently degrading to disk.
 """
 
 from __future__ import annotations
-
-import json
-import logging
 
 import keyring
 import keyring.errors
 from pydantic import SecretStr
 
 from ..errors import AuthError
-from .base import AuthSession
-
-logger = logging.getLogger(__name__)
 
 #: keyring's ``service_name`` for every cddpt entry.
 SERVICE_NAME = "cddpt"
 
 _USERNAME_KEY = "username"
-_MANUAL_COOKIE_KEY = "manual-cookie"
-_SESSION_KEY = "session"
 
 
 def _wrap(action: str, exc: Exception) -> AuthError:
@@ -50,16 +43,15 @@ def _wrap(action: str, exc: Exception) -> AuthError:
         f"cddpt: could not {action} in the system keyring "
         f"({exc.__class__.__name__}). Your OS keyring backend may be "
         "unavailable, locked, or not configured. Options: pass credentials "
-        "via the CDDPT_USERNAME/CDDPT_PASSWORD environment variables, use "
-        "`cddpt auth login --cookie` with a pasted session cookie, or "
+        "via the CDDPT_USERNAME/CDDPT_PASSWORD environment variables, pass a "
+        "session cookie via CDDPT_SESSION_COOKIE or `download --cookie`, or "
         "install/unlock a working keyring backend. cddpt never falls back "
         "to storing secrets in a plaintext file."
     )
 
 
 class CredentialStore:
-    """Keyring-backed storage for username, password, a manually-pasted
-    cookie, and the current :class:`~cddpt.auth.base.AuthSession`."""
+    """Keyring-backed storage for the CDD account's username and password."""
 
     def __init__(self, service_name: str = SERVICE_NAME) -> None:
         self._service_name = service_name
@@ -102,54 +94,11 @@ class CredentialStore:
         except keyring.errors.KeyringError as exc:
             raise _wrap("store the password", exc) from exc
 
-    # -- manual cookie ------------------------------------------------------
-
-    def get_manual_cookie(self) -> SecretStr | None:
-        try:
-            value = keyring.get_password(self._service_name, _MANUAL_COOKIE_KEY)
-        except keyring.errors.KeyringError as exc:
-            raise _wrap("read the stored manual cookie", exc) from exc
-        return SecretStr(value) if value is not None else None
-
-    def set_manual_cookie(self, cookie_value: SecretStr) -> None:
-        try:
-            keyring.set_password(
-                self._service_name, _MANUAL_COOKIE_KEY, cookie_value.get_secret_value()
-            )
-        except keyring.errors.KeyringError as exc:
-            raise _wrap("store the manual cookie", exc) from exc
-
-    # -- session ------------------------------------------------------------
-
-    def load_session(self) -> AuthSession | None:
-        try:
-            raw = keyring.get_password(self._service_name, _SESSION_KEY)
-        except keyring.errors.KeyringError as exc:
-            raise _wrap("read the stored session", exc) from exc
-        if raw is None:
-            return None
-        try:
-            return AuthSession.from_json_dict(json.loads(raw))
-        except (ValueError, KeyError, TypeError) as exc:
-            logger.warning("cddpt: stored session in keyring was malformed, ignoring it: %s", exc)
-            return None
-
-    def save_session(self, session: AuthSession) -> None:
-        try:
-            keyring.set_password(
-                self._service_name, _SESSION_KEY, json.dumps(session.to_json_dict())
-            )
-        except keyring.errors.KeyringError as exc:
-            raise _wrap("store the session", exc) from exc
-
-    def clear_session(self) -> None:
-        self._delete_quiet(_SESSION_KEY)
-
     # -- bulk purge -----------------------------------------------------------
 
     def clear_all(self) -> None:
-        """Purge every cddpt keyring entry: the stored username, its
-        password, the manual cookie, and the cached session.
+        """Purge every cddpt keyring entry: the stored username and its
+        password.
 
         Best-effort: an entry that was never set is simply skipped (not an
         error) -- but a genuinely broken keyring backend still raises
@@ -160,8 +109,6 @@ class CredentialStore:
         if username:
             self._delete_quiet(username)
         self._delete_quiet(_USERNAME_KEY)
-        self._delete_quiet(_MANUAL_COOKIE_KEY)
-        self._delete_quiet(_SESSION_KEY)
 
     def _delete_quiet(self, key: str) -> None:
         try:

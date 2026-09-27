@@ -6,10 +6,10 @@ Skipped unless ``CDDPT_USERNAME``/``CDDPT_PASSWORD`` are set (mirrors
 suite (pytest's default ``addopts = "-m 'not network'"`` already deselects
 ``network``-marked tests too). MDT-2m only (~1 MB tiles) -- never LAZ
 (~342 MB/tile). Auth is resolved purely from env vars, through an
-:class:`~cddpt.auth.base.AuthManager` with **no** :class:`SessionStore` at
-all (an in-memory-only session) -- this must never depend on, or touch, the
-system keyring (docs/PLAN.md's SECRETS note: the macOS keychain may be
-locked in some environments).
+:class:`~cddpt.auth.base.AuthManager` -- which caches its session in memory
+only, by design -- so this must never depend on, or touch, the system
+keyring (docs/PLAN.md's SECRETS note: the macOS keychain may be locked in
+some environments).
 
 Never logs/prints a token, cookie, or pre-signed URL query string -- see
 docs/PLAN.md's SECRETS rules.
@@ -70,11 +70,11 @@ def _build_downloader(
     settings: Settings, governor: RequestGovernor, **kwargs: object
 ) -> tuple[Downloader, CddCatalog]:
     catalog = CddCatalog(settings=settings, governor=governor)
-    # No SessionStore at all: an in-memory-only session, resolved purely
-    # from env credentials -- never touches the system keyring (see this
-    # module's docstring and docs/PLAN.md's SECRETS note).
+    # An in-memory-only session, resolved purely from env credentials --
+    # never touches the system keyring (see this module's docstring and
+    # docs/PLAN.md's SECRETS note).
     provider = KeycloakFormAuthProvider(settings=settings, governor=governor)
-    auth = AuthManager(settings=settings, provider=provider, store=None)
+    auth = AuthManager(settings=settings, provider=provider)
     downloader = Downloader(catalog, auth, settings, governor=governor, **kwargs)  # type: ignore[arg-type]
     return downloader, catalog
 

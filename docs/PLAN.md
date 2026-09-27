@@ -150,18 +150,35 @@ qgis_plugin/cddpt_qgis/       # thin adapter, built last
 ### Auth design
 
 - `AuthProvider` Protocol (`is_available`, `authenticate`, `refresh`, `invalidate`) with an
-  `AuthManager` facade (`current()` → cache → refresh → re-auth; `on_unauthorized()` for
-  302-to-login detection via a `requests` response hook).
+  `AuthManager` facade (`current()` → in-memory cache → refresh → re-auth; `on_unauthorized()`
+  for 302-to-login detection via a `requests` response hook).
+- **The CDD session is in-memory per process, by design — never persisted.** It's a
+  short-lived credential (30 min, absolute expiry, no rolling — confirmed live, M4 pre-work
+  below); persisting it would only save one login per process lifetime while adding a second
+  place secrets can leak. `AuthManager` caches one `AuthSession` as a plain attribute for as
+  long as this process runs, refreshes it proactively (before it actually expires, with a
+  safety margin), and re-authenticates exactly once when several threads observe a rejection
+  concurrently. Each CLI invocation therefore logs in once, lazily, the first time it's
+  actually needed — there is no `cddpt auth login`-then-reuse-later workflow for the session
+  itself.
 - **`KeycloakFormAuthProvider`**: a `requests.Session` follows `GET /auth/login` → Keycloak
   authorize URL, parses the login page with BeautifulSoup4 to find `<form id="kc-form-login">`
   action URL and hidden fields, POSTs `username`/`password`, follows redirects back to
-  `cdd.dgterritorio.gov.pt` to capture `connect.sid`. Username + password stay in `keyring`
-  for silent re-auth — never plaintext, never logged, purged by `cddpt auth logout`.
-- **`ManualCookieAuthProvider`**: paste a `connect.sid` value, stored via `keyring`.
+  `cdd.dgterritorio.gov.pt` to capture `connect.sid`. Username + password — the long-lived
+  secret that makes unattended re-login possible — stay in `keyring` for silent re-auth: never
+  plaintext, never logged, purged by `cddpt auth logout`. Keyring holds *only* this credential;
+  it is never asked to store a session.
+- **`ManualCookieAuthProvider`**: a per-run `connect.sid` value — `CDDPT_SESSION_COOKIE`
+  (`Settings`, a `SecretStr`) or `download --cookie`'s hidden prompt — never stored anywhere,
+  since a pasted cookie is exactly as short-lived as any other session and there is nothing to
+  gain from persisting it. Its `refresh()` always raises `SessionExpired` (a pasted cookie
+  cannot be silently renewed); a download that outlives the 30-minute session needs a fresh
+  paste.
 - Session death (302-to-`/auth/login`) → `SessionExpired` → `AuthManager.on_unauthorized()`
   silent re-auth → in-flight download **resumes from its byte offset**.
 - `probe.py`: capability probe/regression detector; backs `cddpt auth doctor`.
-- QGIS plugin shares the same `keyring` entry as the CLI (not `QgsAuthManager`).
+- QGIS plugin shares the same `keyring` credential entry as the CLI (not `QgsAuthManager`) —
+  the session itself is established fresh per process there too.
 
 ### Download manager
 
@@ -309,12 +326,15 @@ These resolve the "open items requiring a human" and **change the download desig
   `RequestGovernor.from_settings(...)` when not handed one (e.g. `KeycloakFormAuthProvider`)
   silently fragments the rate budget. `cddpt download` wires a single governor through
   search, login, token exchange and transfer; new components must accept and use it too.
-- **Manual-cookie sessions cannot be renewed mid-run.** With only `cddpt auth login --cookie`,
+- **Manual-cookie sessions cannot be renewed mid-run.** With `--cookie`/`CDDPT_SESSION_COOKIE`,
   a download that outlives the 30-minute session fails with an auth error asking for a fresh
   cookie (`ManualCookieAuthProvider.refresh()` raises `SessionExpired` by design). Stored
-  credentials renew transparently.
-- **Locked/unavailable keyring + env credentials** → `cddpt download` warns and continues
-  with an in-memory session instead of failing.
+  username/password credentials renew transparently instead.
+- **`CDDPT_USERNAME`/`CDDPT_PASSWORD` never touch the keyring at all.** `_build_auth_manager`
+  only constructs a `CredentialStore` (and so only notices a locked/unavailable keyring) when
+  env credentials are absent — so a locked keyring is never in the way of an env-credential
+  run, and there is nothing to degrade: without env credentials, a broken keyring is a real
+  `AuthError` (exit 3), since it's the only remaining way to resolve credentials.
 - A `206` whose `Content-Range` starts at neither the requested offset nor 0 fails the asset
   and discards the `.part` (it can be neither appended nor rewritten safely).
 - Destination names derive from item id + media type (`image/tiff*` → `.tif`,

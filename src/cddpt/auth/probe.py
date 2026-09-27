@@ -245,7 +245,7 @@ def doctor(
             governor=governor,
             store=resolved_store,
         )
-        manager = AuthManager(settings=resolved_settings, provider=provider, store=resolved_store)
+        manager = AuthManager(settings=resolved_settings, provider=provider)
         try:
             auth_session = manager.current()
         except AuthError as exc:

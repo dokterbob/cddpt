@@ -91,6 +91,14 @@ class Settings(BaseSettings):
     #: repr()/str() and never appears in logs by accident. Settable via
     #: CDDPT_PASSWORD.
     password: SecretStr | None = None
+    #: A manually-obtained ``connect.sid`` session cookie value, as a
+    #: per-run alternative to username/password (see
+    #: ``cddpt.auth.manual_provider.ManualCookieAuthProvider``). Never
+    #: persisted anywhere -- it's exactly as short-lived as any other CDD
+    #: session (30 minutes, absolute expiry). Settable via
+    #: CDDPT_SESSION_COOKIE, or supplied interactively with
+    #: ``download --cookie``.
+    session_cookie: SecretStr | None = None
 
     # -- TLS --------------------------------------------------------------
     #: Escape hatch for corporate TLS-inspecting (MITM) proxies. When unset
