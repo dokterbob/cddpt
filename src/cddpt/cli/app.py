@@ -14,6 +14,7 @@ from .. import __version__
 from . import _common
 from .auth import app as auth_app
 from .collections import app as collections_app
+from .download import download_command
 from .search import search_command
 
 app = typer.Typer(
@@ -26,6 +27,7 @@ app = typer.Typer(
 app.add_typer(auth_app, name="auth")
 app.add_typer(collections_app, name="collections")
 app.command("search", help=f"Search a collection/AOI. {_common.DISCLAIMER}")(search_command)
+app.command("download", help=f"Download matching assets. {_common.DISCLAIMER}")(download_command)
 
 
 def _version_callback(value: bool) -> None:

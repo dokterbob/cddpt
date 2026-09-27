@@ -31,6 +31,33 @@ def _default_user_agent() -> str:
     return f"cddpt/{__version__} (+https://pypi.org/project/cddpt/)"
 
 
+def validate_concurrency(value: int) -> int:
+    """The concurrency hard-cap/recommended-max policy from docs/PLAN.md's
+    "Backoff & rate-limiting policy": 1..4 (raises :class:`ValueError`
+    outside that range), with a warning above
+    :data:`_RECOMMENDED_MAX_CONCURRENCY`.
+
+    Factored out of :class:`Settings`'s own field validator so
+    :meth:`cddpt.download.Downloader.run` can apply the *exact same* policy
+    to an explicit ``concurrency=`` override -- which bypasses
+    :class:`Settings` entirely and would otherwise never be capped at all
+    (see ``download.py``'s module docstring for why that mattered).
+    """
+
+    if value < 1 or value > _MAX_CONCURRENCY:
+        msg = f"concurrency must be between 1 and {_MAX_CONCURRENCY} (hard cap; got {value})"
+        raise ValueError(msg)
+    if value > _RECOMMENDED_MAX_CONCURRENCY:
+        warnings.warn(
+            f"concurrency={value} exceeds the recommended default of "
+            f"{_RECOMMENDED_MAX_CONCURRENCY}. DGT has published no rate "
+            "limits for this API; higher concurrency is an explicit "
+            "opt-in, not a recommendation.",
+            stacklevel=2,
+        )
+    return value
+
+
 class Settings(BaseSettings):
     """cddpt configuration.
 
@@ -97,18 +124,7 @@ class Settings(BaseSettings):
     @field_validator("concurrency")
     @classmethod
     def _validate_concurrency(cls, value: int) -> int:
-        if value < 1 or value > _MAX_CONCURRENCY:
-            msg = f"concurrency must be between 1 and {_MAX_CONCURRENCY} (hard cap; got {value})"
-            raise ValueError(msg)
-        if value > _RECOMMENDED_MAX_CONCURRENCY:
-            warnings.warn(
-                f"concurrency={value} exceeds the recommended default of "
-                f"{_RECOMMENDED_MAX_CONCURRENCY}. DGT has published no rate "
-                "limits for this API; higher concurrency is an explicit "
-                "opt-in, not a recommendation.",
-                stacklevel=2,
-            )
-        return value
+        return validate_concurrency(value)
 
 
-__all__ = ["Settings"]
+__all__ = ["Settings", "validate_concurrency"]

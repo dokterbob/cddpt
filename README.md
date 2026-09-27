@@ -29,4 +29,13 @@ cddpt search --aoi my_area.geojson --collection MDT-2m --estimate-only
 cddpt search --bbox -9.15,38.70,-9.13,38.72 --collection LAZ --output tiles.geojson
 ```
 
-Downloading (which requires a free CDD account) is not implemented yet — see the roadmap.
+## Downloading (free CDD account required)
+
+```sh
+cddpt auth login                      # stores credentials in your OS keychain
+cddpt download --aoi my_area.geojson --collection MDT-2m --out ./data --dry-run
+cddpt download --aoi my_area.geojson --collection MDT-2m --out ./data --manifest run.json
+```
+
+Downloads resume where they left off and skip files already present. Rate limits are
+deliberately conservative — large areas can take hours to days.

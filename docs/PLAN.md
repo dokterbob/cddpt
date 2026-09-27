@@ -302,3 +302,21 @@ These resolve the "open items requiring a human" and **change the download desig
 - An unauthenticated or expired session on `/download/{token}` gives **302 → `/auth/login`**
   (the `SessionExpired` signal); an authorized session with a spent token gives **403 JSON**.
 - **The session expires absolutely 30 min after login** (no rolling): authenticated responses carry no `Set-Cookie`, and a session last used 1 min after login was rejected (302 → `/auth/login`) at login + 31.5 min.
+
+## Notes from the downloader (M5, 2026-09-27)
+
+- **One governor per run, passed explicitly everywhere.** Any component that falls back to
+  `RequestGovernor.from_settings(...)` when not handed one (e.g. `KeycloakFormAuthProvider`)
+  silently fragments the rate budget. `cddpt download` wires a single governor through
+  search, login, token exchange and transfer; new components must accept and use it too.
+- **Manual-cookie sessions cannot be renewed mid-run.** With only `cddpt auth login --cookie`,
+  a download that outlives the 30-minute session fails with an auth error asking for a fresh
+  cookie (`ManualCookieAuthProvider.refresh()` raises `SessionExpired` by design). Stored
+  credentials renew transparently.
+- **Locked/unavailable keyring + env credentials** → `cddpt download` warns and continues
+  with an in-memory session instead of failing.
+- A `206` whose `Content-Range` starts at neither the requested offset nor 0 fails the asset
+  and discards the `.part` (it can be neither appended nor rewritten safely).
+- Destination names derive from item id + media type (`image/tiff*` → `.tif`,
+  `application/vnd.laszip` → `.laz`, else `mimetypes`, else `.bin`), so reruns can skip
+  completed files without spending tokens; the storage filename is kept in the manifest.

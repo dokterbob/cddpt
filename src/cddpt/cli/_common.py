@@ -18,7 +18,9 @@ import typer
 from rich.console import Console
 from rich.logging import RichHandler
 
-from ..errors import AuthError, CddError
+from ..aoi import Aoi
+from ..catalog import CddCatalog
+from ..errors import AuthError, CddError, ConfigError
 from ..models import CollectionInfo
 from ..settings import Settings
 
@@ -45,8 +47,8 @@ EXIT_USAGE = 2
 #: SessionExpired subclass), raised by `cddpt auth login`/`status`/`logout`
 #: or by anything else that hits an auth problem. See handle_errors below.
 EXIT_AUTH_FAILURE = 3
-#: Reserved: insufficient disk space (the downloader lands in a later
-#: milestone; no command raises this yet).
+#: Insufficient free disk space for a planned download (`cddpt download`,
+#: raised from :class:`~cddpt.errors.InsufficientDiskSpace`).
 EXIT_INSUFFICIENT_DISK = 4
 
 #: Threshold (decimal bytes) above which an estimate gets the "this will
@@ -154,6 +156,75 @@ def license_reminder(collections: dict[str, CollectionInfo], collection_ids: lis
     )
 
 
+def parse_bbox(value: str) -> tuple[float, float, float, float]:
+    """Parse a ``--bbox`` value (``W,S,E,N``) into WGS84 decimal degrees.
+
+    Shared by ``search`` and ``download`` -- both take the exact same AOI
+    selection flags (docs/PLAN.md's CLI surface).
+    """
+
+    parts = value.split(",")
+    if len(parts) != 4:
+        raise typer.BadParameter(f"--bbox must be W,S,E,N (got {value!r})")
+    try:
+        west, south, east, north = (float(p.strip()) for p in parts)
+    except ValueError as exc:
+        raise typer.BadParameter(f"--bbox values must be numbers (got {value!r})") from exc
+    return west, south, east, north
+
+
+def build_aoi(bbox: str | None, aoi_file: Path | None, wkt: str | None) -> Aoi:
+    """Build an :class:`~cddpt.aoi.Aoi` from exactly one of ``--bbox``/``--aoi``/``--wkt``.
+
+    Shared by ``search`` and ``download``.
+    """
+
+    given = [
+        name
+        for name, value in (("--bbox", bbox), ("--aoi", aoi_file), ("--wkt", wkt))
+        if value is not None
+    ]
+    if len(given) == 0:
+        raise typer.BadParameter("exactly one of --bbox, --aoi, or --wkt is required")
+    if len(given) > 1:
+        raise typer.BadParameter(
+            f"--bbox, --aoi, and --wkt are mutually exclusive (got {', '.join(given)})"
+        )
+
+    if bbox is not None:
+        return Aoi.from_bbox(*parse_bbox(bbox))
+    if wkt is not None:
+        return Aoi.from_wkt(wkt)
+
+    assert aoi_file is not None
+    if not aoi_file.is_file():
+        raise typer.BadParameter(f"--aoi: no such file: {aoi_file}")
+    suffix = aoi_file.suffix.lower()
+    if suffix in {".geojson", ".json"}:
+        return Aoi.from_geojson(aoi_file)
+    # Any other vector format (shapefile, GeoPackage, ...) needs the
+    # optional cddpt[files] extra -- Aoi.from_file raises a clean
+    # ConfigError itself if it's missing; let it propagate (see
+    # cli/app.py's generic CddError handling).
+    return Aoi.from_file(aoi_file)
+
+
+def validate_collections(catalog: CddCatalog, requested: list[str]) -> dict[str, CollectionInfo]:
+    """Validate ``requested`` collection ids against the live
+    ``/collections`` list, raising a clean :class:`~cddpt.errors.ConfigError`
+    naming every valid id if any are unknown. Shared by ``search`` and
+    ``download``."""
+
+    known = {c.id: c for c in catalog.collections()}
+    unknown = [cid for cid in requested if cid not in known]
+    if unknown:
+        raise ConfigError(
+            f"cddpt: unknown collection id(s): {', '.join(unknown)}. "
+            f"Valid ids: {', '.join(sorted(known))}"
+        )
+    return known
+
+
 def describe_error(exc: CddError) -> str:
     """A friendly, single-line message for a :class:`~cddpt.errors.CddError`
     -- no traceback unless ``--verbose``."""
@@ -201,6 +272,7 @@ __all__ = [
     "LARGE_ESTIMATE_BYTES",
     "MAX_TABLE_ROWS",
     "CliState",
+    "build_aoi",
     "build_settings",
     "configure_logging",
     "describe_error",
@@ -208,5 +280,7 @@ __all__ = [
     "handle_errors",
     "human_size",
     "license_reminder",
+    "parse_bbox",
     "set_state",
+    "validate_collections",
 ]
