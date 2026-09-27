@@ -11,7 +11,7 @@ Status tracker for the milestones in [PLAN.md](PLAN.md).
 | 5 | Downloader | done (offline-tested; live run pending) |
 | 6 | Hardening + PyPI 0.1.0 | planned |
 | 7 | QGIS plugin — see [qgis-plugin.md](qgis-plugin.md) | planned |
-| — | `build-cog` companion tool — see [build-cog.md](build-cog.md) | planned |
+| — | `build-cog` companion tool — see [build-cog.md](build-cog.md) | implemented (synthetic-data tested; real-tile run pending) |
 
 ## Milestone details (M4–M6)
 
@@ -53,8 +53,12 @@ Each phase follows *build → independent review → fix → re-review*. Checkpo
    - module boundaries match the architecture; no subsystem reimplements a chosen library.
 2. **After the QGIS plugin** — additionally: `bootstrap.py` install flow never silent / at
    startup; plugin shares the CLI's `keyring` entry; no core call outside a `QgsTask`.
-3. **After `build-cog`** — additionally: atomic rename is gated by validation; `MAX_Z_ERROR`
-   enforced end-to-end (pixel-diff actually run); Stage 2 has no chunking beyond `--bbox`.
+3. **After `build-cog`** — additionally: atomic rename (`convert`) is gated by validation;
+   `MAX_Z_ERROR` enforced end-to-end (pixel-diff actually run against real DGT tiles, not just
+   synthetic fixtures); `merge`'s guaranteed overview level is genuinely seamless (no
+   tile-boundary discontinuity) and the power-of-2 pyramid around it is restricted to exact
+   divisors of the guaranteed factor, so no level is built by cascading over a non-integer
+   ratio; `merge` has no chunking beyond `--bbox`.
 
 ## Deferred / policy
 

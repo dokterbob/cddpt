@@ -1,101 +1,124 @@
-# Companion tool: `build-cog` — batch COG re-encoder
+# Companion tool: `build-cog` — seamless COG re-encoder
 
 A separate, standalone deliverable: a downstream *usage* of `cddpt`'s output, not part of the
 core package. Given a directory of downloaded plain-GeoTIFF DTM/DSM tiles (e.g. from
-`cddpt download --collection MDT-50cm`), re-encode them into tiled, LERC-compressed
-Cloud-Optimized GeoTIFFs. Pure local-file processing — no auth, no network, no AOI logic.
-Lives in `tools/cog_recipe/`; its Typer command could later be registered on cddpt's CLI
-with no redesign.
+`cddpt download --collection MDT-50cm`), merges them into **one** seamless, LERC-compressed
+Cloud-Optimized GeoTIFF (COG) at native resolution, with an overview pyramid guaranteed to
+contain an exact, contour-friendly resolution (10 m by default). Pure local-file processing —
+no auth, no network, no AOI logic. Lives in `tools/cog_recipe/` as its own `uv` project,
+independent of the root `cddpt` dependency set and lockfile.
 
-**Why re-encode**: a live sample tile (`MDT-50cm-194469-07-2025`) confirmed DGT's source
-rasters are single-band Float32, 2000×2000 px (0.5 m pixels), **strip-encoded (not tiled)**,
-effectively uncompressed (~19.1 MiB/tile). At ~92,000 tiles that's **~1.8 TB** for MDT-50cm
-alone, with no internal tiling for efficient partial/range reads.
+Full pipeline write-up, rationale, and design detail: **[tools/cog_recipe/README.md](../tools/cog_recipe/README.md)**.
+This page is the short version plus the facts that motivated the design.
 
-**The lossy step is deliberate and disclosed**: LERC with `MAX_Z_ERROR=0.05` m — half of
-DGT's published 10 cm vertical-accuracy requirement — bounds quantization error uniformly
-across the elevation range (unlike a float16 downcast, which degrades to ~2 m error at Serra
-da Estrela elevations). Native Float32 dtype preserved; only the *encoding* is lossy, with a
-known bound.
+## Why re-encode
 
-## Stage 1 — per-tile COG conversion
+A live sample tile (`MDT-50cm-194469-07-2025`) confirmed DGT's source rasters are single-band
+Float32, 2000×2000 px (0.5 m pixels), **strip-encoded (not tiled)**, effectively uncompressed
+(~19 MiB/tile). At ~92,000 tiles that's **~1.8 TB** for MDT-50cm alone, with no internal
+tiling for efficient partial/range reads, and each 1 km tile is a separate file with no
+knowledge of its neighbours.
 
-- **`rio-cogeo`** Python API (`cog_translate` / `cog_validate`), not a `gdal_translate`
-  subprocess. Built-in `"lerc_zstd"` profile (`cog_profiles.get("lerc_zstd")`) sets
-  `COMPRESS=LERC_ZSTD`, tiling, 512×512 blocks; `MAX_Z_ERROR` merged in as an extra creation
-  option. **Override two defaults**: `overview_resampling="average"` (default `"nearest"` is
-  wrong for continuous elevation) and `use_cog_driver=True` (GDAL's single-pass COG driver).
-  Preserve source `nodata` (default to `-999` only if unset, with a logged warning).
-- **Concurrency**: stdlib `ProcessPoolExecutor`, default `workers = cpu_count() - 1`,
-  `GDAL_NUM_THREADS=1` per worker; both flags, with a documented "keep
-  `workers × gdal-threads` near `cpu_count()`" guardrail.
-- **Resumability = file existence at final path**, no manifest. Write `<dest>.tmp` in the
-  same directory, validate, then atomically `os.replace` — "exists at final path" always
-  implies "validated". Resume pre-scan filters the to-do list and clears stray `.tmp` orphans.
-- **Error handling**: per-tile `try/except` returns `Result(ok=False, error=...)`; failures
-  appended immediately to `_failed.csv` (`source_path,error,timestamp`) and retried on the
-  next run. Pre-flight check that the local GDAL supports `LERC_ZSTD` — fail fast with one
-  message instead of 92,000.
-- **Validation** (gates the atomic rename): `cog_validate()` plus width/height/CRS/nodata
-  round-trip check against the source via `rasterio`.
-- **Output layout** mirrors the input tree 1:1.
-- **Reporting**: `tqdm` over `as_completed()`; final `_summary.json` with
-  processed/skipped/failed counts and measured total input vs. output bytes.
+## Merge first, then encode — not per-tile-then-mosaic
 
-## Stage 2 — country-wide 10 m mosaic for contour generation
+A per-tile COG's overview pyramid is built independently per 1 km tile, with no knowledge of
+neighbouring tiles — every overview level bakes in a visible/measurable discontinuity at each
+former tile boundary (a problem for rendering and, critically, for contouring). Merging all
+tiles into one mosaic first and decimating the *merged* raster removes this: an averaging
+window at a tile boundary spans real neighbouring pixels from both tiles. So the primary
+command, `build-cog merge`, builds a seamless mosaic across all input tiles, writes one COG
+from it at native resolution, and guarantees an overview level at an exact resolution as part
+of the same pass (see "Overview pyramid" below). Per-tile conversion (`build-cog convert`) is
+kept as a secondary command for the case where independently-servable per-tile COGs are
+themselves the wanted output.
 
-Per-tile overviews are power-of-2 decimations (1/2/4/8/16 m — none is 10 m) and are decimated
-*per 1 km tile*, baking seams into contours at every tile boundary. So: **seamless mosaic
-first, then resample once**.
+## The lossy trade-off (disclosed)
 
-- **Size**: mainland bbox (~561 km × ~218 km) at 10 m ≈ 1.22 G pixels ≈ **~4.9 GB Float32** —
-  practical on a workstation. **No chunking**; only an optional `--bbox` clip for constrained
-  test machines.
-- **Step 1**: `osgeo.gdal.BuildVRT()` (a deliberate, narrow exception to preferring rasterio)
-  over the **Stage-1 COG outputs** (their tiling and overviews make windowed reads cheap).
-- **Step 2**: `osgeo.gdal.Warp()` with `xRes=yRes=10`, `targetAlignedPixels=True`,
-  **`resampleAlg="average"`** (integrates all 20×20 source pixels per cell), same nodata, no
-  reprojection. The VRT lets each averaging window span tile boundaries — this removes seams.
-- **Step 3**: COG-encode via Stage 1's shared `_write_cog` helper (same `lerc_zstd` profile,
-  same `MAX_Z_ERROR=0.05` default, exposed as its own flag).
-- **README** documents the intended consumer —
-  `gdal_contour -a elev -i 10 mosaic_10m_cog.tif contours_10m.gpkg` — and why mosaic-first
-  (seams) and why 10 m.
+Both commands compress with **LERC_ZSTD**, `MAX_Z_ERROR=0.05` m by default — half of DGT's
+published 10 cm vertical-accuracy requirement. This bounds the *encoding* quantization error
+uniformly across the whole elevation range (unlike, say, a float16 downcast, which degrades to
+multi-metre error at high elevations such as Serra da Estrela). Native Float32 dtype and CRS
+are preserved exactly; only the on-disk *encoding* is lossy, with a known, configurable bound
+(`--max-z-error`). Disclosed in `--help` on both commands.
 
-## CLI surface
+## Pipeline (`merge`)
+
+Built entirely on **rasterio's bundled GDAL** — no `osgeo`, no system GDAL required (rasterio
+wheels vendor their own libgdal; a preflight checks it supports LERC_ZSTD):
+
+1. Scan and validate the input tiles form one mosaicable grid.
+2. Write a mosaic as hand-written GDAL VRT XML over their union (or a `--bbox` clip, snapped
+   to the overview grid) — a lazy, seamless view; no pixel data read yet.
+3. Stream-copy the VRT into a base GeoTIFF at native resolution (`rasterio.shutil.copy`, or a
+   bounded block loop when clipping) — the full mosaic is never materialized as one array.
+4. Build overviews on the merged raster (`Dataset.build_overviews`, `average` resampling) with
+   an explicit factor list that includes the guaranteed resolution.
+5. Encode the final COG (`driver="COG", OVERVIEWS=FORCE_USE_EXISTING"`), re-packing the
+   already-built overviews instead of discarding and recomputing them.
+
+## Overview-factor rule
+
+GDAL's COG driver only ever builds power-of-2 overviews, none of which lands on 10 m for 0.5 m
+or 2 m native data. `--ensure-overview-res` must be an exact integer multiple of the native
+resolution (fails fast otherwise); the pyramid below it is restricted to the power-of-2 levels
+that **evenly divide** that factor. This restriction was discovered empirically: GDAL's
+overview builder cascades each new level from the nearest already-built one rather than always
+from the full-resolution source, so cascading over a non-integer ratio (e.g. a factor-5 level
+built from an existing factor-4 one) introduces real error (~0.0077 m measured on a 10 m test
+level) — an order of magnitude past LERC quantization noise, silently breaking the "seamless,
+exactly averaged" guarantee. Restricting every step to an exact multiple of its predecessor
+keeps the whole pyramid, not just the guaranteed level, mathematically exact.
+
+- **0.5 m native**, `--ensure-overview-res 10` (factor 20; divisors 2, 4 — 8 and 16 do not
+  divide 20): factors `[2, 4, 20, 40, 80, ...]` → resolutions `[1, 2, 10, 20, 40, ...]` m.
+- **2 m native** (factor 5, prime — no divisor besides 1): factors `[5, 10, 20, 40, ...]` →
+  resolutions `[10, 20, 40, 80, ...]` m.
+
+## CLI surface (as implemented)
 
 ```
-build-cog convert INPUT_DIR OUTPUT_DIR
+build-cog merge INPUT_DIR OUTPUT.tif
+  --pattern TEXT [*.tif]  --bbox minx,miny,maxx,maxy  --max-z-error FLOAT [0.05]
+  --nodata FLOAT [source; -999 if unset]  --ensure-overview-res FLOAT [10.0]
+  --compress TEXT [lerc_zstd]  --blocksize INT [512]  --overview-resampling TEXT [average]
+  --keep-intermediate/--no-keep-intermediate [off]  --gdal-threads TEXT [ALL_CPUS]
+
+build-cog convert INPUT_DIR OUTPUT_DIR   # secondary: per-tile COGs, 1:1 output tree
   --pattern TEXT [*.tif]  --max-z-error FLOAT [0.05]  --compress TEXT [lerc_zstd]
-  --overview-resampling TEXT [average]  --blocksize INT [512]  --nodata FLOAT [source]
-  --workers INT [cpu_count()-1]  --gdal-threads INT [1]
-  --resume/--force [--resume]  --validate/--no-validate [--validate]
-  --log-file PATH [OUTPUT_DIR/_failed.csv]  --report-file PATH [OUTPUT_DIR/_summary.json]
-
-build-cog mosaic-10m INPUT_DIR OUTPUT_FILE
-  --pattern TEXT [*.tif]  --resolution FLOAT [10.0]  --resampling TEXT [average]
-  --max-z-error FLOAT [0.05]  --nodata FLOAT [-999]
-  --warp-threads TEXT [ALL_CPUS]  --warp-memory-mb INT [2048]
-  --keep-intermediate/--no-keep-intermediate [--no-keep-intermediate]
+  --blocksize INT [512]  --overview-resampling TEXT [average]  --nodata FLOAT [source]
+  --resume/--force [resume]  --log-file PATH  --report-file PATH
 ```
 
-## Files
+Verify directly against the installed tool: `uv run --project tools/cog_recipe build-cog --help`,
+`... build-cog merge --help`, `... build-cog convert --help`.
 
-```
-tools/cog_recipe/__init__.py
-tools/cog_recipe/build_cog.py     # scan_tiles, _write_cog (shared by both stages), convert
-tools/cog_recipe/mosaic_10m.py    # build_vrt, resample_to_10m, mosaic-10m
-tools/cog_recipe/README.md        # usage + lossy-tradeoff and mosaic-first rationale
-tests/test_build_cog.py           # resume-skip, atomic-rename-on-failure, validation catching
-                                  # a deliberately mismatched CRS/nodata fixture
+## Install / run
+
+Not part of the root `cddpt` project's dependencies or lockfile — its own `uv` project:
+
+```console
+$ uv run --project tools/cog_recipe build-cog merge INPUT_DIR OUTPUT.tif
 ```
 
-Dependencies: `rio-cogeo>=7.0`, `rasterio>=1.3.3`, `tqdm`, `typer`; local GDAL must support
-`LERC_ZSTD` (checked at startup).
+Or as a standalone `uv` tool from a Git checkout:
+
+```console
+$ uv tool install 'cddpt-build-cog @ git+https://github.com/dokterbob/cddpt#subdirectory=tools/cog_recipe'
+$ build-cog merge INPUT_DIR OUTPUT.tif
+```
 
 ## Verification
 
-Before full-country scale, run both stages against `MDT-50cm-194469-07-2025.tif`: assert
-output 2000×2000, `nodata == -999`, CRS == EPSG:3763, `cog_validate()` passes; then diff
-pixel values against the source (`numpy.abs(diff).max() <= 0.05 + epsilon`) to confirm
-`MAX_Z_ERROR` is honored end-to-end.
+Synthetic Float32 GeoTIFF tiles (small, strip-encoded like DGT's real output, generated
+on the fly, no network/credentials) exercise the pipeline in `tools/cog_recipe/tests/` —
+including the empirically-measured overview-cascade error above. Run with
+`uv run --project tools/cog_recipe pytest`. A real-tile run against DGT output (assert output
+dimensions/CRS/nodata, `cog_validate()` passes, pixel diff against source within
+`MAX_Z_ERROR`) is still pending — see `docs/roadmap.md`.
+
+## Future: integrate into cddpt
+
+The core pipeline (`merge.py`/`convert.py`/etc.) takes no dependency on `typer`/`tqdm`; it
+exposes a plain `ProgressCallback` protocol instead, with `cli.py` as a thin wrapper. This is
+meant to make a later `cddpt build-cog` subcommand (or an optional `cddpt[cog]` extra) a
+drop-in, not a rewrite.
