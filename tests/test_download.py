@@ -27,7 +27,7 @@ from shapely.geometry import Point
 from cddpt.auth.base import AuthManager, AuthProvider, AuthSession, utcnow
 from cddpt.catalog import CddCatalog
 from cddpt.download import Downloader, DownloadPlan, PlannedDownload, ProgressCallback
-from cddpt.errors import InsufficientDiskSpace
+from cddpt.errors import DownloadError, InsufficientDiskSpace
 from cddpt.models import AssetRef, DownloadOutcome, DownloadStatus
 from cddpt.naming import ByCollectionLayout, ByTileLayout, FlatLayout
 from cddpt.ratelimit import RequestGovernor
@@ -48,8 +48,14 @@ _EXPIRED_PRESIGNED_BODY = '{"Code":"AccessDenied","Message":"Request has expired
 _SPENT_TOKEN_BODY = '{"status":403,"message":"Forbidden Access - Expired token or file not found"}'
 
 
-def _settings() -> Settings:
-    return Settings()
+def _settings(*, mint_batch_size: int | None = 1) -> Settings:
+    """``mint_batch_size=1`` by default -- the old, one-token-at-a-time
+    behaviour -- so every test in this file except the batch-minting ones
+    (below) keeps asserting against single-id ``POST /search`` calls
+    without needing to know batching exists at all. The batch-minting tests
+    pass their own ``mint_batch_size`` explicitly."""
+
+    return Settings(mint_batch_size=mint_batch_size)
 
 
 def _fast_governor() -> RequestGovernor:
@@ -93,6 +99,13 @@ def _search_body(asset: AssetRef, token: str) -> dict[str, object]:
 
 
 def _register_mint(asset: AssetRef, token: str) -> None:
+    """A single-id, no-``limit`` ``POST /search`` -- what
+    :meth:`~cddpt.download.Downloader._mint_href` sends directly (never
+    through the batch pool): the spent-token re-mint retry, a batch
+    response's missing-id fallback, and (with the default
+    ``mint_batch_size=1`` -- see :func:`_settings`) every test in this file
+    that isn't specifically about batching."""
+
     responses.add(
         responses.POST,
         SEARCH_URL,
@@ -101,6 +114,52 @@ def _register_mint(asset: AssetRef, token: str) -> None:
         match=[
             matchers.json_params_matcher(
                 {"collections": [asset.collection_id], "ids": [asset.item_id]}
+            )
+        ],
+    )
+
+
+def _batch_search_body(assets: list[AssetRef], tokens: list[str]) -> dict[str, object]:
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "id": asset.item_id,
+                "collection": asset.collection_id,
+                "assets": {asset.asset_key: {"href": TOKEN_URL.format(token=token)}},
+            }
+            for asset, token in zip(assets, tokens, strict=True)
+        ],
+    }
+
+
+def _register_batch_mint(
+    assets: list[AssetRef], tokens: list[str], *, links: list[dict[str, object]] | None = None
+) -> None:
+    """The batch ``POST /search`` a worker's *first* mint attempt sends via
+    :class:`~cddpt.download._MintPool` -- one collection, several ``ids``,
+    and an explicit ``limit`` (see download.py's module docstring, point
+    1). ``links`` optionally adds a STAC ``rel: "next"`` link to the
+    response body, for the defensive-pagination test."""
+
+    collection_id = assets[0].collection_id
+    assert all(a.collection_id == collection_id for a in assets)
+    body = _batch_search_body(assets, tokens)
+    if links is not None:
+        body["links"] = links
+    responses.add(
+        responses.POST,
+        SEARCH_URL,
+        json=body,
+        status=200,
+        match=[
+            matchers.json_params_matcher(
+                {
+                    "collections": [collection_id],
+                    "ids": [a.item_id for a in assets],
+                    "limit": len(assets),
+                }
             )
         ],
     )
@@ -126,12 +185,17 @@ def _register_exchange_forbidden(token: str, body: str = _SPENT_TOKEN_BODY) -> N
 
 
 def _downloader(
-    *, catalog: CddCatalog, auth: AuthManager, governor: RequestGovernor, **kwargs: object
+    *,
+    catalog: CddCatalog,
+    auth: AuthManager,
+    governor: RequestGovernor,
+    settings: Settings | None = None,
+    **kwargs: object,
 ) -> Downloader:
     return Downloader(
         catalog,
         auth,
-        _settings(),
+        settings if settings is not None else _settings(),
         governor=governor,
         retry_sleep=lambda _seconds: None,
         **kwargs,  # type: ignore[arg-type]
@@ -802,6 +866,373 @@ def test_cancel_event_stops_mid_transfer_and_keeps_part_file(tmp_path: Path) -> 
     assert not dest.exists()
     assert part.is_file()
     assert 0 < part.stat().st_size < 1000
+
+
+# ---------------------------------------------------------------------------
+# Batch minting (mint_batch_size > 1): fewer /search POSTs, per-collection
+# grouping, missing-id fallback, never-batched spent-token re-mint,
+# thread-safety, and cancellation discarding pre-minted-but-unused hrefs.
+# ---------------------------------------------------------------------------
+
+
+def _presigned_for(item_id: str) -> str:
+    return f"https://stor-002.a.acnca.pt:9000/bucket/{item_id}?X-Amz-Expires=3600"
+
+
+@responses.activate
+def test_batch_mint_used_for_multiple_same_collection_assets(tmp_path: Path) -> None:
+    """10 assets, one collection, mint_batch_size=5 -> exactly 2 batch-mint
+    POSTs (not 10)."""
+
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+    downloader = _downloader(
+        catalog=catalog,
+        auth=_simple_auth_manager(),
+        governor=governor,
+        settings=_settings(mint_batch_size=5),
+    )
+
+    assets = [_asset(item_id=f"MDT-2m-E{i:02d}", size_bytes=10) for i in range(10)]
+    tokens = [f"tok-e{i}" for i in range(10)]
+    _register_batch_mint(assets[0:5], tokens[0:5])
+    _register_batch_mint(assets[5:10], tokens[5:10])
+    for asset, token in zip(assets, tokens, strict=True):
+        presigned = _presigned_for(asset.item_id)
+        _register_exchange_redirect(token, presigned)
+        responses.add(responses.GET, presigned, status=200, body=b"x" * 10)
+
+    plan = downloader.plan(assets, tmp_path, ByCollectionLayout())
+    outcomes = downloader.run(plan, concurrency=1)
+
+    assert len(outcomes) == 10
+    assert all(o.status == DownloadStatus.downloaded for o in outcomes)
+    search_posts = [c for c in responses.calls if c.request.url == SEARCH_URL]
+    assert len(search_posts) == 2
+
+
+@responses.activate
+def test_batch_mint_groups_by_collection(tmp_path: Path) -> None:
+    """Interleaved collections in plan order still produce one batch-mint
+    POST per collection group -- a batch never mixes collections, since the
+    /search filter is per-request."""
+
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+    downloader = _downloader(
+        catalog=catalog,
+        auth=_simple_auth_manager(),
+        governor=governor,
+        settings=_settings(mint_batch_size=3),
+    )
+
+    a1 = _asset(item_id="MDT-2m-A1", collection_id="MDT-2m", size_bytes=10)
+    b1 = _asset(item_id="LAZ-B1", collection_id="LAZ", size_bytes=10)
+    a2 = _asset(item_id="MDT-2m-A2", collection_id="MDT-2m", size_bytes=10)
+    b2 = _asset(item_id="LAZ-B2", collection_id="LAZ", size_bytes=10)
+    a3 = _asset(item_id="MDT-2m-A3", collection_id="MDT-2m", size_bytes=10)
+    b3 = _asset(item_id="LAZ-B3", collection_id="LAZ", size_bytes=10)
+    assets = [a1, b1, a2, b2, a3, b3]
+    tokens = ["tok-a1", "tok-b1", "tok-a2", "tok-b2", "tok-a3", "tok-b3"]
+
+    _register_batch_mint([a1, a2, a3], ["tok-a1", "tok-a2", "tok-a3"])
+    _register_batch_mint([b1, b2, b3], ["tok-b1", "tok-b2", "tok-b3"])
+    for asset, token in zip(assets, tokens, strict=True):
+        presigned = _presigned_for(asset.item_id)
+        _register_exchange_redirect(token, presigned)
+        responses.add(responses.GET, presigned, status=200, body=b"x" * 10)
+
+    plan = downloader.plan(assets, tmp_path, ByCollectionLayout())
+    outcomes = downloader.run(plan, concurrency=1)
+
+    assert len(outcomes) == 6
+    assert all(o.status == DownloadStatus.downloaded for o in outcomes)
+    search_posts = [c for c in responses.calls if c.request.url == SEARCH_URL]
+    assert len(search_posts) == 2
+
+
+@responses.activate
+def test_batch_mint_missing_id_falls_back_to_individual_mint(tmp_path: Path) -> None:
+    """A batch response that omits one of the requested ids (a partial
+    /search response) mints that one id individually instead of dropping it
+    or failing the whole batch."""
+
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+    downloader = _downloader(
+        catalog=catalog,
+        auth=_simple_auth_manager(),
+        governor=governor,
+        settings=_settings(mint_batch_size=3),
+    )
+
+    a1 = _asset(item_id="MDT-2m-F1", size_bytes=10)
+    a2 = _asset(item_id="MDT-2m-F2", size_bytes=10)
+    a3 = _asset(item_id="MDT-2m-F3", size_bytes=10)
+
+    # The batch response only resolves a1 and a3 -- a2 is missing.
+    responses.add(
+        responses.POST,
+        SEARCH_URL,
+        json=_batch_search_body([a1, a3], ["tok-f1", "tok-f3"]),
+        status=200,
+        match=[
+            matchers.json_params_matcher(
+                {
+                    "collections": ["MDT-2m"],
+                    "ids": [a1.item_id, a2.item_id, a3.item_id],
+                    "limit": 3,
+                }
+            )
+        ],
+    )
+    # Fallback: a2 is minted individually (no "limit" -- see _mint_href).
+    _register_mint(a2, "tok-f2")
+
+    for asset, token in ((a1, "tok-f1"), (a2, "tok-f2"), (a3, "tok-f3")):
+        presigned = _presigned_for(asset.item_id)
+        _register_exchange_redirect(token, presigned)
+        responses.add(responses.GET, presigned, status=200, body=b"x" * 10)
+
+    plan = downloader.plan([a1, a2, a3], tmp_path, ByCollectionLayout())
+    outcomes = downloader.run(plan, concurrency=1)
+
+    assert len(outcomes) == 3
+    assert all(o.status == DownloadStatus.downloaded for o in outcomes)
+
+
+@responses.activate
+def test_batch_minted_token_403_triggers_single_remint(tmp_path: Path) -> None:
+    """A 403 (spent/expired) on a batch-minted token re-mints just that one
+    asset directly -- never through the batch pool again."""
+
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+    downloader = _downloader(
+        catalog=catalog,
+        auth=_simple_auth_manager(),
+        governor=governor,
+        settings=_settings(mint_batch_size=5),
+    )
+
+    asset = _asset(size_bytes=1000)
+    _register_batch_mint([asset], ["tok-1"])
+    _register_exchange_forbidden("tok-1")
+    _register_mint(asset, "tok-2")  # single re-mint, no "limit"
+    _register_exchange_redirect("tok-2", PRESIGNED_1)
+    responses.add(responses.GET, PRESIGNED_1, status=200, body=b"x" * 1000)
+
+    plan = downloader.plan([asset], tmp_path, ByCollectionLayout())
+    outcomes = downloader.run(plan)
+
+    assert outcomes[0].status == DownloadStatus.downloaded
+    assert outcomes[0].bytes_transferred == 1000
+
+
+@responses.activate
+def test_batch_mint_concurrency_no_double_mint_or_lost_assets(tmp_path: Path) -> None:
+    """2 worker threads, 9 same-collection assets, batch size 3: every asset
+    is minted exactly once (never twice, never skipped) regardless of which
+    thread happens to trigger each batch, and there are exactly 3 batch-mint
+    POSTs (9 / 3)."""
+
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+    downloader = _downloader(
+        catalog=catalog,
+        auth=_simple_auth_manager(),
+        governor=governor,
+        settings=_settings(mint_batch_size=3),
+    )
+
+    assets = [_asset(item_id=f"MDT-2m-G{i:02d}", size_bytes=10) for i in range(9)]
+    asset_ids = {a.item_id for a in assets}
+    requested_ids: list[str] = []
+    lock = threading.Lock()
+
+    def _mint_callback(request: object) -> tuple[int, dict[str, str], str]:
+        payload = json.loads(getattr(request, "body"))  # noqa: B009
+        ids = payload["ids"]
+        assert payload["collections"] == ["MDT-2m"]
+        assert payload["limit"] == len(ids)
+        with lock:
+            requested_ids.extend(ids)
+        body = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "id": item_id,
+                    "collection": "MDT-2m",
+                    "assets": {"data": {"href": TOKEN_URL.format(token=f"tok-{item_id}")}},
+                }
+                for item_id in ids
+            ],
+        }
+        return (200, {"Content-Type": "application/json"}, json.dumps(body))
+
+    responses.add_callback(responses.POST, SEARCH_URL, callback=_mint_callback)
+
+    for asset in assets:
+        token = f"tok-{asset.item_id}"
+        presigned = _presigned_for(asset.item_id)
+        _register_exchange_redirect(token, presigned)
+        responses.add(responses.GET, presigned, status=200, body=b"x" * 10)
+
+    plan = downloader.plan(assets, tmp_path, ByCollectionLayout())
+    outcomes = downloader.run(plan, concurrency=2)
+
+    assert len(outcomes) == 9
+    assert {o.asset.item_id for o in outcomes} == asset_ids
+    assert all(o.status == DownloadStatus.downloaded for o in outcomes)
+    # Every asset was requested exactly once across all batch-mint calls --
+    # no double-mint, nothing lost.
+    assert sorted(requested_ids) == sorted(asset_ids)
+    search_posts = [c for c in responses.calls if c.request.url == SEARCH_URL]
+    assert len(search_posts) == 3
+
+
+@responses.activate
+def test_batch_mint_transient_failure_only_fails_calling_asset(tmp_path: Path) -> None:
+    """A batch-level mint failure (e.g. a transient HttpError after
+    urllib3's own retries, or any other exception out of the mint call)
+    must not fail every asset in that batch -- only the one asset whose
+    worker actually triggered (and absorbed) it. The other batch members
+    are simply un-claimed, never touching ``_errors``, so their own workers
+    mint them fresh afterwards."""
+
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+    downloader = _downloader(
+        catalog=catalog,
+        auth=_simple_auth_manager(),
+        governor=governor,
+        settings=_settings(mint_batch_size=4),
+    )
+
+    assets = [_asset(item_id=f"MDT-2m-J{i:02d}", size_bytes=10) for i in range(4)]
+
+    # A patched _mint_batch: fails outright the first time it's called (the
+    # batch of 4 that the first worker's take() triggers), then behaves
+    # normally -- see this module's docstring, "or a raised exception from
+    # a patched _mint_batch".
+    original_mint_batch = downloader._mint_batch
+    call_count = 0
+
+    def flaky_mint_batch(batch: list[AssetRef]) -> dict[object, object]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise DownloadError("cddpt: simulated transient batch-mint failure")
+        return original_mint_batch(batch)
+
+    downloader._mint_batch = flaky_mint_batch  # type: ignore[method-assign]
+
+    def _mint_callback(request: object) -> tuple[int, dict[str, str], str]:
+        payload = json.loads(getattr(request, "body"))  # noqa: B009
+        ids = payload["ids"]
+        assert payload["limit"] == len(ids)
+        body = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "id": item_id,
+                    "collection": "MDT-2m",
+                    "assets": {"data": {"href": TOKEN_URL.format(token=f"tok-{item_id}")}},
+                }
+                for item_id in ids
+            ],
+        }
+        return (200, {"Content-Type": "application/json"}, json.dumps(body))
+
+    responses.add_callback(responses.POST, SEARCH_URL, callback=_mint_callback)
+
+    for asset in assets:
+        token = f"tok-{asset.item_id}"
+        presigned = _presigned_for(asset.item_id)
+        _register_exchange_redirect(token, presigned)
+        responses.add(responses.GET, presigned, status=200, body=b"x" * 10)
+
+    plan = downloader.plan(assets, tmp_path, ByCollectionLayout())
+    outcomes = downloader.run(plan, concurrency=1)
+
+    assert len(outcomes) == 4
+    failed = [o for o in outcomes if o.status == DownloadStatus.failed]
+    downloaded = [o for o in outcomes if o.status == DownloadStatus.downloaded]
+
+    # Only the one asset that absorbed the batch-level failure ends up
+    # failed -- the other three still download successfully, re-minted
+    # individually on demand rather than being dragged down by someone
+    # else's transient error.
+    assert len(failed) == 1
+    assert "simulated transient batch-mint failure" in (failed[0].error or "")
+    assert len(downloaded) == 3
+    assert {o.asset.item_id for o in downloaded} == {a.item_id for a in assets} - {
+        failed[0].asset.item_id
+    }
+    # The mint call ran once (failing) for the batch, then again
+    # successfully for whatever the other three assets needed -- retried,
+    # never masked behind the first error.
+    assert call_count >= 2
+
+
+class _CancelAfterFirstDone:
+    """A :class:`ProgressCallback` that cancels once ``item_id`` finishes --
+    used to show that the *other* assets' hrefs, pre-minted in the very
+    same batch call, are simply discarded (never exchanged) at
+    cancellation."""
+
+    def __init__(self, event: threading.Event, item_id: str) -> None:
+        self._event = event
+        self._item_id = item_id
+
+    def on_start(self, asset: AssetRef, total_bytes: int | None) -> None:
+        pass
+
+    def on_progress(self, asset: AssetRef, nbytes: int) -> None:
+        pass
+
+    def on_done(self, outcome: DownloadOutcome) -> None:
+        if outcome.asset.item_id == self._item_id:
+            self._event.set()
+
+
+@responses.activate
+def test_batch_mint_cancellation_discards_preminted_unused_hrefs(tmp_path: Path) -> None:
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+    cancel_event = threading.Event()
+
+    assets = [_asset(item_id=f"MDT-2m-H{i:02d}", size_bytes=10) for i in range(4)]
+    progress = _CancelAfterFirstDone(cancel_event, assets[0].item_id)
+    downloader = Downloader(
+        catalog,
+        _simple_auth_manager(),
+        _settings(mint_batch_size=4),
+        governor=governor,
+        progress=progress,
+        retry_sleep=lambda _seconds: None,
+    )
+
+    tokens = [f"tok-h{i}" for i in range(4)]
+    # A single batch mint covers all four -- batch_size=4 and only 4 assets.
+    _register_batch_mint(assets, tokens)
+    presigned_0 = _presigned_for(assets[0].item_id)
+    _register_exchange_redirect(tokens[0], presigned_0)
+    responses.add(responses.GET, presigned_0, status=200, body=b"x" * 10)
+    # Deliberately no exchange/transfer mocks for tokens[1:] -- if the pool's
+    # pre-minted-but-unused hrefs were ever exchanged, this test would fail
+    # with a ConnectionError from an unregistered request instead.
+
+    plan = downloader.plan(assets, tmp_path, ByCollectionLayout())
+    outcomes = downloader.run(plan, concurrency=1, cancel_event=cancel_event)
+
+    assert len(outcomes) == 1
+    assert outcomes[0].asset.item_id == assets[0].item_id
+    assert outcomes[0].status == DownloadStatus.downloaded
+    search_posts = [c for c in responses.calls if c.request.url == SEARCH_URL]
+    assert len(search_posts) == 1
 
 
 # ---------------------------------------------------------------------------

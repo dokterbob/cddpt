@@ -51,8 +51,15 @@ DOWNLOADS_URL = f"{SITE_URL}/dgt-fe/downloads"
 
 PRESIGNED_1 = "https://stor-002.a.acnca.pt:9000/bucket/key1?X-Amz-Expires=3600&X-Amz-Signature=sig1"
 
-#: A rate policy fast enough to never actually sleep during a test.
-_FAST_ENV = {"CDDPT_REQUESTS_PER_SECOND": "1000", "CDDPT_BURST": "1000"}
+#: A rate policy fast enough to never actually sleep during a test, plus the
+#: old one-token-at-a-time mint behaviour -- this file's ``_register_mint``
+#: mocks a single-id, no-``limit`` ``POST /search`` throughout (batch
+#: minting itself is covered by ``test_download.py``).
+_FAST_ENV = {
+    "CDDPT_REQUESTS_PER_SECOND": "1000",
+    "CDDPT_BURST": "1000",
+    "CDDPT_MINT_BATCH_SIZE": "1",
+}
 
 _LISBON_BBOX = "-9.15,38.70,-9.10,38.75"
 

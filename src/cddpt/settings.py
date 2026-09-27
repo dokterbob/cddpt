@@ -26,6 +26,18 @@ _MAX_CONCURRENCY = 4
 #: Above this, a warning is emitted but the value is still accepted.
 _RECOMMENDED_MAX_CONCURRENCY = 2
 
+#: Hard cap on ``Settings.mint_batch_size`` and on the auto-scaled default
+#: :meth:`cddpt.download.Downloader.run` computes when it is left unset --
+#: see docs/PLAN.md's downloader notes on batch minting: download tokens are
+#: single-use and their lifetime beyond that is unknown, so a run must never
+#: mint far ahead of use no matter how high concurrency is configured.
+MAX_MINT_BATCH_SIZE = 50
+#: Multiplier ``Downloader.run`` applies to the *effective* concurrency to
+#: derive ``mint_batch_size``'s default when ``Settings.mint_batch_size`` is
+#: left unset (``None``) -- e.g. concurrency=2 -> a default batch of 8. A
+#: bigger pool only makes sense with more workers actively consuming it.
+DEFAULT_MINT_BATCH_CONCURRENCY_MULTIPLIER = 4
+
 
 def _default_user_agent() -> str:
     return f"cddpt/{__version__} (+https://pypi.org/project/cddpt/)"
@@ -55,6 +67,26 @@ def validate_concurrency(value: int) -> int:
             "opt-in, not a recommendation.",
             stacklevel=2,
         )
+    return value
+
+
+def validate_mint_batch_size(value: int | None) -> int | None:
+    """The ``mint_batch_size`` policy: ``None`` (auto -- see
+    :data:`DEFAULT_MINT_BATCH_CONCURRENCY_MULTIPLIER`) is always accepted;
+    an explicit value must be between 1 (the old, one-token-at-a-time
+    behaviour) and :data:`MAX_MINT_BATCH_SIZE` inclusive.
+
+    Factored out of :class:`Settings`'s own field validator for the same
+    reason as :func:`validate_concurrency`: nothing else currently needs an
+    override path for this one, but keeping the policy in one place avoids
+    it drifting if that changes.
+    """
+
+    if value is None:
+        return None
+    if value < 1 or value > MAX_MINT_BATCH_SIZE:
+        msg = f"mint_batch_size must be between 1 and {MAX_MINT_BATCH_SIZE} (got {value})"
+        raise ValueError(msg)
     return value
 
 
@@ -113,6 +145,17 @@ class Settings(BaseSettings):
     #: Concurrent downloads. Validated to 1..4 below; values above 2 emit a
     #: warning, values above 4 are rejected outright.
     concurrency: int = 2
+    #: How many single-use download tokens one ``POST /search`` batch-mints
+    #: at once (see docs/PLAN.md's downloader notes: minting one id at a
+    #: time made minting a full third of all governed requests on a large
+    #: run). ``1`` is the old, one-token-at-a-time behaviour. ``None`` (the
+    #: default) auto-scales to
+    #: ``min(4 * effective_concurrency, MAX_MINT_BATCH_SIZE)`` at download
+    #: time instead of a fixed number, since a bigger pool only makes sense
+    #: with more workers consuming it -- see
+    #: ``cddpt.download.Downloader.run``. Settable via
+    #: ``CDDPT_MINT_BATCH_SIZE``.
+    mint_batch_size: int | None = None
 
     # -- AOI chunking ------------------------------------------------------
     chunk_km2: float = 2000.0
@@ -139,5 +182,16 @@ class Settings(BaseSettings):
     def _validate_concurrency(cls, value: int) -> int:
         return validate_concurrency(value)
 
+    @field_validator("mint_batch_size")
+    @classmethod
+    def _validate_mint_batch_size(cls, value: int | None) -> int | None:
+        return validate_mint_batch_size(value)
 
-__all__ = ["Settings", "validate_concurrency"]
+
+__all__ = [
+    "DEFAULT_MINT_BATCH_CONCURRENCY_MULTIPLIER",
+    "MAX_MINT_BATCH_SIZE",
+    "Settings",
+    "validate_concurrency",
+    "validate_mint_batch_size",
+]

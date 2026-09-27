@@ -340,6 +340,12 @@ These resolve the "open items requiring a human" and **change the download desig
 - Destination names derive from item id + media type (`image/tiff*` → `.tif`,
   `application/vnd.laszip` → `.laz`, else `mimetypes`, else `.bin`), so reruns can skip
   completed files without spending tokens; the storage filename is kept in the manifest.
+- **Download tokens are batch-minted, never far ahead of use.** Minting one id at a time made
+  minting a full third of a large run's governed requests; a worker's first mint attempt now
+  draws from a small thread-safe pool (keyed by `(collection_id, item_id, asset_key)`, sized
+  `mint_batch_size` / `CDDPT_MINT_BATCH_SIZE` — default `min(4 × concurrency, 50)`, `1` = old
+  behaviour) refilled just-in-time, per collection, via one `POST /search` with several `ids`
+  and `limit ≥ len(ids)`; the 403-spent-token retry still re-mints only that one asset.
 
 ## Findings from the first real downloads (2026-09-27)
 

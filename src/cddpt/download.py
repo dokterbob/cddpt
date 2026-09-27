@@ -9,7 +9,19 @@ section before touching this file)
    *never* read from an :class:`~cddpt.models.AssetRef` here -- this module
    always re-mints a fresh one right before use, via a tiny anonymous
    ``POST /search {"collections": [...], "ids": [item_id]}`` (cheap; no auth
-   needed -- search itself is fully anonymous, see ``catalog.py``).
+   needed -- search itself is fully anonymous, see ``catalog.py``). Minting
+   one id at a time makes minting a full third of a large run's governed
+   requests, so a worker's *first* mint attempt for an asset instead draws
+   from :class:`_MintPool`, a small pool of hrefs pre-minted a handful of
+   assets ahead of use (``settings.mint_batch_size``, default
+   ``min(4 * concurrency, 50)``) via ``POST /search`` with several ``ids``
+   and an explicit ``limit >= len(ids)`` at once -- one batch call instead
+   of one call per file. Tokens are still never minted far ahead of use (the
+   pool is refilled from the upcoming work queue in plan order, just before
+   a worker actually needs its href) and still never persisted/reused across
+   assets. ``mint_batch_size=1`` is the old one-token-at-a-time behaviour,
+   bit-for-bit on the wire. The *retry* path (point 2 below, after a 403) is
+   never batched -- it always re-mints just the one spent/expired asset.
 2. **Exchange**: ``GET /download/{token}`` with the CDD session cookie,
    ``allow_redirects=False``:
    - 302 to ``/auth/login`` -- the session is missing/expired
@@ -75,11 +87,11 @@ import os
 import shutil
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import requests
@@ -98,7 +110,12 @@ from .http import make_session
 from .models import AssetRef, DownloadOutcome, DownloadStatus
 from .naming import Layout
 from .ratelimit import RequestGovernor
-from .settings import Settings, validate_concurrency
+from .settings import (
+    DEFAULT_MINT_BATCH_CONCURRENCY_MULTIPLIER,
+    MAX_MINT_BATCH_SIZE,
+    Settings,
+    validate_concurrency,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +142,21 @@ _MAX_TRANSFER_ATTEMPTS = 6
 #: Substrings (checked case-insensitively) of an S3/MinIO error body that
 #: indicate an expired pre-signed URL -- see module docstring, point 3.
 _EXPIRED_PRESIGNED_MARKERS = ("accessdenied", "request has expired", "expired")
+
+#: Defensive cap on how many STAC ``rel: "next"`` pages a single batch-mint
+#: call will follow -- see :meth:`Downloader._mint_batch`. An explicit
+#: ``limit >= len(ids)`` should make more than one page unreachable in
+#: practice; this only guards against a server that ignores ``limit``.
+_MAX_MINT_PAGES = 5
+
+#: Uniquely identifies one asset's single-use download token within a run --
+#: an item id is only unique per collection, and (in principle) a
+#: collection's item could expose more than one data-bearing asset key.
+_MintKey = tuple[str, str, str]
+
+
+def _mint_key(asset: AssetRef) -> _MintKey:
+    return (asset.collection_id, asset.item_id, asset.asset_key)
 
 
 def _part_path(dest: Path) -> Path:
@@ -174,6 +206,160 @@ _TRANSIENT_TRANSFER_EXCEPTIONS: tuple[type[BaseException], ...] = (
     requests.exceptions.ChunkedEncodingError,
     _PresignedUrlExpired,
 )
+
+
+def _asset_href_from_feature(feature: Mapping[str, Any], asset: AssetRef) -> str | None:
+    """The href of ``asset.asset_key`` in one ``/search`` response feature,
+    or ``None`` if that feature doesn't carry it (never raises -- callers
+    decide how to treat a miss)."""
+
+    assets = feature.get("assets")
+    asset_payload = assets.get(asset.asset_key) if isinstance(assets, Mapping) else None
+    if not isinstance(asset_payload, Mapping):
+        return None
+    href = asset_payload.get("href")
+    return href if isinstance(href, str) and href else None
+
+
+def _find_next_link(payload: Any) -> Mapping[str, Any] | None:
+    """The STAC ``rel: "next"`` link in a ``/search`` response, if any --
+    see :meth:`Downloader._mint_batch`."""
+
+    if not isinstance(payload, Mapping):
+        return None
+    links = payload.get("links")
+    if not isinstance(links, list):
+        return None
+    for link in links:
+        if isinstance(link, Mapping) and link.get("rel") == "next":
+            return link
+    return None
+
+
+class _MintPool:
+    """A small, thread-safe pool of pre-minted, single-use download hrefs,
+    keyed by ``(collection_id, item_id, asset_key)``.
+
+    Refilled in small batches, just ahead of use, from the upcoming work
+    queue (in plan order): a worker asking for an asset's href either finds
+    it already pre-minted, or becomes (or waits for) the one in-flight batch
+    mint that includes it -- at most one batch mint is ever in flight at a
+    time, so an asset is never minted twice and no asset is ever skipped.
+    Tokens are still never minted far ahead of use (see docs/PLAN.md's M4
+    pre-work: their lifetime beyond single-use is unknown) -- a batch is
+    only ever minted in response to an actual worker asking for one of its
+    hrefs, never speculatively ahead of that.
+
+    Not constructed at all when the effective batch size is 1 (see
+    :meth:`Downloader.run`) -- that is the pre-batching behaviour, preserved
+    bit-for-bit on the wire (:meth:`Downloader._mint_href` directly, with no
+    ``limit`` parameter).
+    """
+
+    def __init__(
+        self,
+        ordered_assets: Iterable[AssetRef],
+        batch_size: int,
+        mint_fn: Callable[[list[AssetRef]], dict[_MintKey, str | Exception]],
+    ) -> None:
+        self._assets = list(ordered_assets)
+        self._batch_size = max(batch_size, 1)
+        self._mint_fn = mint_fn
+        self._cond = threading.Condition()
+        #: Index of the earliest asset in ``self._assets`` not yet claimed
+        #: by some batch -- a light optimization only (correctness comes
+        #: from ``self._claimed``, not from this ever being exact).
+        self._cursor = 0
+        self._claimed: set[_MintKey] = set()
+        self._hrefs: dict[_MintKey, str] = {}
+        self._errors: dict[_MintKey, Exception] = {}
+        self._minting = False
+
+    def take(self, asset: AssetRef) -> str:
+        """A fresh href for ``asset``: from the pool if already pre-minted,
+        else this call becomes (or waits for) the batch mint that includes
+        it. Safe to call more than once for the same asset (e.g. a
+        pre-signed URL that expired mid-transfer) -- each call mints a
+        fresh token."""
+
+        key = _mint_key(asset)
+        with self._cond:
+            while True:
+                if key in self._hrefs:
+                    return self._hrefs.pop(key)
+                if key in self._errors:
+                    raise self._errors.pop(key)
+                if self._minting:
+                    self._cond.wait()
+                    continue
+                batch = self._claim_batch_locked(asset)
+                self._minting = True
+                break
+
+        try:
+            results = self._mint_fn(batch)
+        except Exception:
+            # A batch-level failure (e.g. a transient HttpError after
+            # urllib3's own retries, or an auth hiccup) must not fail every
+            # asset in the batch -- only the caller of *this* take() call
+            # sees it (via the bare `raise` below, propagating straight to
+            # its own worker). Every other batch member is simply
+            # un-claimed, never touching self._errors, so its own worker's
+            # next take() call mints it fresh -- not stuck failed forever
+            # for someone else's transient error.
+            with self._cond:
+                for a in batch:
+                    self._claimed.discard(_mint_key(a))
+                self._minting = False
+                self._cond.notify_all()
+            raise
+
+        with self._cond:
+            for a in batch:
+                k = _mint_key(a)
+                outcome = results.get(k)
+                if outcome is None:
+                    self._errors[k] = DownloadError(
+                        f"cddpt: batch mint response is missing {a.item_id!r} "
+                        f"(asset {a.asset_key!r})"
+                    )
+                elif isinstance(outcome, Exception):
+                    self._errors[k] = outcome
+                else:
+                    self._hrefs[k] = outcome
+            self._minting = False
+            self._cond.notify_all()
+            if key in self._hrefs:
+                return self._hrefs.pop(key)
+            raise self._errors.pop(key)
+
+    def _claim_batch_locked(self, asset: AssetRef) -> list[AssetRef]:
+        """A batch that always includes ``asset``, plus up to
+        ``batch_size - 1`` further not-yet-claimed assets of the same
+        collection (a search's ``collections`` filter is per-request --
+        see :meth:`Downloader._mint_batch`), scanning forward from the
+        shared cursor in plan order. Must be called with :attr:`_cond` held.
+        """
+
+        key = _mint_key(asset)
+        batch = [asset]
+        self._claimed.add(key)
+
+        i = self._cursor
+        while len(batch) < self._batch_size and i < len(self._assets):
+            candidate = self._assets[i]
+            ckey = _mint_key(candidate)
+            if ckey not in self._claimed and candidate.collection_id == asset.collection_id:
+                batch.append(candidate)
+                self._claimed.add(ckey)
+            i += 1
+
+        while self._cursor < len(self._assets) and _mint_key(self._assets[self._cursor]) in (
+            self._claimed
+        ):
+            self._cursor += 1
+
+        return batch
 
 
 class ProgressCallback(Protocol):
@@ -388,6 +574,9 @@ class Downloader:
         self._retry_sleep: Callable[[float], None] = (
             retry_sleep if retry_sleep is not None else time.sleep
         )
+        #: Built fresh by each :meth:`run` call (``None`` when the effective
+        #: batch size is 1 -- see :meth:`_get_presigned_url`).
+        self._mint_pool: _MintPool | None = None
 
     # -- Planning -----------------------------------------------------------
 
@@ -522,6 +711,30 @@ class Downloader:
             # constructed.
             effective_concurrency = self._settings.concurrency
 
+        # See module docstring, point 1: mint_batch_size=None auto-scales to
+        # the effective concurrency (already validated above, whether from
+        # an override or from Settings); an explicit value was already
+        # validated by Settings' own field validator. 1 is the old
+        # one-token-at-a-time behaviour -- no pool is built at all, so
+        # _get_presigned_url falls straight back to _mint_href.
+        effective_batch_size = (
+            self._settings.mint_batch_size
+            if self._settings.mint_batch_size is not None
+            else min(
+                DEFAULT_MINT_BATCH_CONCURRENCY_MULTIPLIER * effective_concurrency,
+                MAX_MINT_BATCH_SIZE,
+            )
+        )
+        self._mint_pool = (
+            _MintPool(
+                ordered_assets=(p.asset for p in plan.to_download),
+                batch_size=effective_batch_size,
+                mint_fn=self._mint_batch,
+            )
+            if effective_batch_size > 1
+            else None
+        )
+
         try:
             with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
                 futures = [
@@ -615,8 +828,13 @@ class Downloader:
     # -- Token minting + exchange --------------------------------------------
 
     def _mint_href(self, asset: AssetRef) -> str:
-        """A fresh, single-use download-token href for ``asset`` -- never
-        ``asset.href`` itself (see module docstring, point 1)."""
+        """A fresh, single-use download-token href for ``asset`` alone --
+        never ``asset.href`` itself (see module docstring, point 1). Used
+        for the spent-token re-mint retry (never batched -- module
+        docstring), as the fallback for an id a batch mint's response
+        didn't include, and as the whole mint path when
+        ``settings.mint_batch_size == 1`` (the old, pre-batching
+        behaviour)."""
 
         response = self._cdd_session.post(
             self._catalog.search_url,
@@ -639,19 +857,111 @@ class Downloader:
             raise DownloadError(
                 f"cddpt: /search returned no item re-minting a download token for {asset.item_id}"
             )
-        matching = next((f for f in features if f.get("id") == asset.item_id), features[0])
-        assets = matching.get("assets") if isinstance(matching, dict) else None
-        asset_payload = (assets or {}).get(asset.asset_key)
-        if not isinstance(asset_payload, dict) or "href" not in asset_payload:
+        matching = next(
+            (f for f in features if isinstance(f, dict) and f.get("id") == asset.item_id),
+            features[0],
+        )
+        href = _asset_href_from_feature(matching, asset) if isinstance(matching, dict) else None
+        if href is None:
             raise DownloadError(
                 f"cddpt: /search response is missing asset {asset.asset_key!r} for {asset.item_id}"
             )
-        href = asset_payload["href"]
-        if not isinstance(href, str) or not href:
-            raise DownloadError(
-                f"cddpt: malformed asset href re-minting a download token for {asset.item_id}"
-            )
         return href
+
+    def _mint_batch(self, batch: list[AssetRef]) -> dict[_MintKey, str | Exception]:
+        """Batch-mint fresh, single-use hrefs for every asset in ``batch``
+        in one ``POST /search`` -- ``ids: [...]`` and an explicit
+        ``limit >= len(batch)``, per this module's docstring, point 1.
+
+        ``batch`` must share one ``collection_id`` -- :class:`_MintPool`
+        (its only caller) never builds a mixed-collection batch, since the
+        search's ``collections`` filter is per-request.
+
+        Follows a STAC ``rel: "next"`` link defensively (``limit >=
+        len(batch)`` should make more than one page unreachable in
+        practice, capped at :data:`_MAX_MINT_PAGES`). Any id requested but
+        still missing afterwards -- a partial batch response -- is minted
+        individually via :meth:`_mint_href` rather than silently dropped or
+        failing the whole batch; if that individual mint also fails, the
+        failure is recorded for that asset alone.
+        """
+
+        assert batch, "_mint_batch called with an empty batch"
+        collection_id = batch[0].collection_id
+        assert all(a.collection_id == collection_id for a in batch), (
+            "_mint_batch requires every asset to share one collection_id"
+        )
+
+        by_item_id = {a.item_id: a for a in batch}
+        results: dict[_MintKey, str | Exception] = {}
+
+        url = self._catalog.search_url
+        body: dict[str, object] = {
+            "collections": [collection_id],
+            "ids": list(by_item_id),
+            "limit": max(len(by_item_id), 1),
+        }
+
+        for _ in range(_MAX_MINT_PAGES):
+            response = self._cdd_session.post(url, json=body)
+            if response.status_code != 200:
+                raise DownloadError(
+                    f"cddpt: batch-minting {len(by_item_id)} download token(s) for "
+                    f"collection {collection_id!r} failed (HTTP {response.status_code})"
+                )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise DownloadError(
+                    f"cddpt: non-JSON /search response batch-minting download "
+                    f"tokens for collection {collection_id!r}"
+                ) from exc
+
+            features = payload.get("features") if isinstance(payload, dict) else None
+            if features:
+                for feature in features:
+                    item_id = feature.get("id") if isinstance(feature, dict) else None
+                    if not isinstance(item_id, str) or item_id not in by_item_id:
+                        continue
+                    key = _mint_key(by_item_id[item_id])
+                    if key in results:
+                        continue
+                    href = _asset_href_from_feature(feature, by_item_id[item_id])
+                    if href is not None:
+                        results[key] = href
+
+            if len(results) >= len(by_item_id):
+                break
+
+            next_link = _find_next_link(payload)
+            next_href = next_link.get("href") if next_link is not None else None
+            if not isinstance(next_href, str) or not next_href:
+                break
+            url = next_href
+            if next_link is not None:
+                next_body = next_link.get("body")
+                if isinstance(next_body, dict):
+                    body = {**body, **next_body} if next_link.get("merge") else dict(next_body)
+        else:
+            logger.warning(
+                "cddpt: batch mint for collection %r stopped after %d page(s) "
+                "without resolving every requested id",
+                collection_id,
+                _MAX_MINT_PAGES,
+            )
+
+        # Anything requested but not resolved above -- mint individually
+        # rather than silently dropping it or failing the whole batch.
+        for asset in by_item_id.values():
+            key = _mint_key(asset)
+            if key in results:
+                continue
+            try:
+                results[key] = self._mint_href(asset)
+            except DownloadError as exc:
+                results[key] = exc
+
+        return results
 
     def _exchange_with_reauth(self, href: str, asset: AssetRef) -> str:
         """Exchange ``href`` for a pre-signed URL, retrying once (with the
@@ -688,13 +998,24 @@ class Downloader:
         )
 
     def _get_presigned_url(self, asset: AssetRef) -> str:
-        """Mint a fresh token and exchange it for a pre-signed URL, re-minting
+        """Get a fresh token and exchange it for a pre-signed URL, re-minting
         once more if the exchange reports the token as spent/expired (see
-        module docstring, point 2)."""
+        module docstring, point 2).
+
+        The *first* attempt draws from :attr:`_mint_pool` when one is
+        configured (``settings.mint_batch_size != 1`` -- see :meth:`run`),
+        so several assets' first attempts are typically satisfied by one
+        shared batch mint. The spent-token retry (attempt 2) always mints
+        just this one asset directly via :meth:`_mint_href`, never batched
+        -- module docstring, point 1.
+        """
 
         last_error: _SpentToken | None = None
-        for _ in range(_MAX_MINT_ATTEMPTS):
-            href = self._mint_href(asset)
+        for attempt in range(_MAX_MINT_ATTEMPTS):
+            if attempt == 0 and self._mint_pool is not None:
+                href = self._mint_pool.take(asset)
+            else:
+                href = self._mint_href(asset)
             try:
                 return self._exchange_with_reauth(href, asset)
             except _SpentToken as exc:
