@@ -29,7 +29,7 @@ from cog_recipe.convert import (
 )
 from cog_recipe.convert import convert_directory
 from cog_recipe.errors import CogRecipeError
-from cog_recipe.grid import Bounds
+from cog_recipe.grid import Bounds, union_bounds
 from cog_recipe.merge import (
     DEFAULT_BLOCKSIZE,
     DEFAULT_COMPRESS,
@@ -39,6 +39,8 @@ from cog_recipe.merge import (
 )
 from cog_recipe.merge import merge_tiles as _merge_tiles
 from cog_recipe.progress import ProgressCallback, ProgressEvent
+from cog_recipe.regions import compute_region_grid
+from cog_recipe.tileset import scan_tile_bounds, scan_tiles
 
 app = typer.Typer(
     name="build-cog",
@@ -122,13 +124,64 @@ def merge(
     gdal_num_threads: Annotated[
         str, typer.Option("--gdal-threads", help="GDAL_NUM_THREADS for the streaming copy steps.")
     ] = "ALL_CPUS",
+    cache_mb: Annotated[
+        int | None,
+        typer.Option(
+            "--cache-mb",
+            help="GDAL_CACHEMAX in MB for the whole pipeline (default: min(25% of detected "
+            "RAM, 8192)).",
+        ),
+    ] = None,
+    pool_size: Annotated[
+        int | None,
+        typer.Option(
+            "--pool-size",
+            help="GDAL_MAX_DATASET_POOL_SIZE -- how many source tiles GDAL keeps open at "
+            "once. A full-width 0.5 m block row can touch 500+ tiles, well above GDAL's own "
+            "~100 default (default here: the GDAL_MAX_DATASET_POOL_SIZE env var if set, "
+            "else 1000). The process's file-descriptor limit is raised toward its hard "
+            "limit if needed, with a warning if that's not enough headroom.",
+        ),
+    ] = None,
+    tmp_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--tmp-dir",
+            help="Directory for the intermediate mosaic VRT + base GeoTIFF (default: "
+            "OUTPUT's own directory). Point this at a different disk than OUTPUT to split "
+            "the disk-space preflight's peak-usage estimate across filesystems.",
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Skip the disk-space preflight check."),
+    ] = False,
+    scan_workers: Annotated[
+        int | None,
+        typer.Option(
+            "--scan-workers",
+            help="Thread-pool size for the initial tile scan (default: ~4x CPU count, "
+            "capped at 32 -- this is I/O-bound, so oversubscribing cores is intentional).",
+        ),
+    ] = None,
+    fast_scan: Annotated[
+        bool,
+        typer.Option(
+            "--fast-scan",
+            help="Skip per-tile CRS/dtype/pixel-size/rotation cross-checks except on a "
+            "sample (~200 tiles); trusts the rest to share the sampled tiles' grid. Only "
+            "safe for a directory of consistently-named, already-trusted DGT tiles.",
+        ),
+    ] = False,
 ) -> None:
     """Merge tiles into ONE seamless, native-resolution COG (the primary command).
 
     Builds a seamless mosaic first, then encodes it as a COG with a
     guaranteed overview at --ensure-overview-res (default 10 m) built with
     'average' resampling on the merged raster -- so that level has no seams
-    at former tile boundaries. See the README for the `gdal_contour` recipe.
+    at former tile boundaries. See the README for the `gdal_contour` recipe,
+    and docs/build-cog.md "National-scale runs" for --cache-mb/--pool-size/
+    --tmp-dir/--fast-scan guidance on a 91k-tile national merge.
     """
 
     parsed_bbox = _parse_bbox(bbox)
@@ -149,6 +202,12 @@ def merge(
                 overview_resampling=overview_resampling,
                 keep_intermediate=keep_intermediate,
                 gdal_num_threads=gdal_num_threads,
+                cache_mb=cache_mb,
+                pool_size=pool_size,
+                tmp_dir=tmp_dir,
+                force=force,
+                scan_workers=scan_workers,
+                fast_scan=fast_scan,
                 progress=_tqdm_progress(bar),
             )
         except CogRecipeError as exc:
@@ -158,7 +217,8 @@ def merge(
     typer.echo(
         f"Wrote {result.output_path} ({result.width}x{result.height} @ {result.resolution} m, "
         f"{result.tile_count} tiles, overview factors {result.overview_factors}, "
-        f"{result.output_bytes / 1e6:.1f} MB)"
+        f"{result.output_bytes / 1e6:.1f} MB, GDAL_CACHEMAX={result.gdal_cache_mb} MB, "
+        f"GDAL_MAX_DATASET_POOL_SIZE={result.gdal_pool_size}, BIGTIFF={result.bigtiff})"
     )
 
 
@@ -233,6 +293,74 @@ def convert(
     if summary.failed:
         typer.echo(f"failures logged to {summary.failed_csv}", err=True)
         raise typer.Exit(code=1)
+
+
+@app.command("plan-regions")
+def plan_regions(
+    input_dir: Annotated[
+        Path, typer.Argument(exists=True, file_okay=False, help="Tile directory.")
+    ],
+    region_grid_km: Annotated[
+        float, typer.Option("--region-grid", help="Region size in km (snapped up to the grid).")
+    ],
+    pattern: Annotated[str, typer.Option(help="Glob pattern for input tiles.")] = "*.tif",
+    ensure_overview_res: Annotated[
+        float,
+        typer.Option(
+            "--ensure-overview-res",
+            help="Grid resolution (m) each region's bbox is snapped to -- pass the same "
+            "value you'll use on each `merge` invocation.",
+        ),
+    ] = DEFAULT_ENSURE_OVERVIEW_RES,
+    output_dir: Annotated[
+        Path,
+        typer.Option(
+            "--output-dir", help="Directory the printed commands write each region's COG to."
+        ),
+    ] = Path("regions"),
+    scan_workers: Annotated[
+        int | None, typer.Option("--scan-workers", help="Thread-pool size for the bounds scan.")
+    ] = None,
+) -> None:
+    """Print `build-cog merge --bbox ...` commands tiling INPUT_DIR into --region-grid km squares.
+
+    Convenience for national-scale 0.5 m runs, where merging the whole
+    country in one `merge` call is impractical (huge peak-disk footprint, a
+    single multi-hour run with no incremental progress). Each printed
+    command is a fully independent `build-cog merge` invocation --
+    parallelizable across processes/machines/disks -- producing its own
+    seamless-within-itself, grid-aligned COG. This command does not merge
+    regions back together; run each printed command yourself. See
+    docs/build-cog.md "National-scale runs".
+    """
+
+    paths = scan_tiles(input_dir, pattern)
+    if not paths:
+        typer.secho(
+            f"build-cog plan-regions: no tiles matching {pattern!r} found in {input_dir}",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    bounds_list = scan_tile_bounds(paths, max_workers=scan_workers)
+    mosaic_bounds = union_bounds(bounds_list)
+    regions = compute_region_grid(mosaic_bounds, region_grid_km * 1000.0, ensure_overview_res)
+
+    typer.echo(
+        f"# {len(paths)} tiles, mosaic bounds {mosaic_bounds}, "
+        f"{len(regions)} region(s) of ~{region_grid_km} km snapped to the "
+        f"{ensure_overview_res} m grid",
+        err=True,
+    )
+    for region in regions:
+        col, row = region.index
+        minx, miny, maxx, maxy = region.bounds
+        out_path = output_dir / f"region_{col:03d}_{row:03d}.tif"
+        typer.echo(
+            f"build-cog merge {input_dir} {out_path} --pattern {pattern!r} "
+            f"--bbox {minx},{miny},{maxx},{maxy} --ensure-overview-res {ensure_overview_res}"
+        )
 
 
 def main() -> None:

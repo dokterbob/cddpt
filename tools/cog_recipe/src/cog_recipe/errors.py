@@ -33,3 +33,12 @@ class ValidationError(CogRecipeError):
     renamed to its final path, so "exists at the final path" always implies
     "validated".
     """
+
+
+class DiskPreflightError(CogRecipeError):
+    """Raised when the estimated peak disk usage exceeds free space.
+
+    Checked before any tile data is written (see ``resources.py``), so a
+    national-scale run fails in seconds with a clear message instead of
+    hours in with `ENOSPC`. Skippable with ``--force``.
+    """

@@ -7,7 +7,7 @@ import pytest
 import rasterio
 from rio_cogeo.cogeo import cog_validate
 
-from cog_recipe.errors import GdalCapabilityError
+from cog_recipe.errors import DiskPreflightError, GdalCapabilityError
 from cog_recipe.merge import merge_tiles
 from cog_recipe.tileset import DEFAULT_NODATA
 
@@ -195,3 +195,132 @@ def test_merge_preflight_lerc_zstd_failure(
         merge_tiles(input_dir, output)
 
     assert not output.exists()
+
+
+def test_merge_reports_resource_tuning(
+    tile_grid_2x2: tuple[Path, dict[tuple[int, int], np.ndarray]],
+) -> None:
+    input_dir, _arrays = tile_grid_2x2
+    output = input_dir.parent / "merged.tif"
+
+    result = merge_tiles(
+        input_dir,
+        output,
+        ensure_overview_res=2.5,
+        blocksize=128,
+        cache_mb=123,
+        pool_size=456,
+    )
+
+    assert result.gdal_cache_mb == 123
+    assert result.gdal_pool_size == 456
+    # This tiny synthetic mosaic is nowhere near the BIGTIFF threshold.
+    assert result.bigtiff == "IF_SAFER"
+
+
+def test_merge_bigtiff_yes_above_threshold(
+    tile_grid_2x2: tuple[Path, dict[tuple[int, int], np.ndarray]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir, _arrays = tile_grid_2x2
+    output = input_dir.parent / "merged.tif"
+
+    import cog_recipe.merge as merge_mod
+
+    # Force the BIGTIFF decision so this tiny mosaic exercises the
+    # BIGTIFF=YES branch end-to-end (the real size threshold is unit-tested
+    # directly in test_resources.py).
+    monkeypatch.setattr(merge_mod.resources, "choose_bigtiff", lambda *_a, **_kw: "YES")
+
+    result = merge_tiles(input_dir, output, ensure_overview_res=2.5, blocksize=128)
+    assert result.bigtiff == "YES"
+
+    is_valid, errors, _ = cog_validate(str(output))
+    assert is_valid, errors
+
+
+def test_merge_tmp_dir_places_intermediates_separately(
+    tile_grid_2x2: tuple[Path, dict[tuple[int, int], np.ndarray]],
+    tmp_path: Path,
+) -> None:
+    input_dir, _arrays = tile_grid_2x2
+    output_dir = tmp_path / "out"
+    tmp_dir = tmp_path / "scratch"
+    output = output_dir / "merged.tif"
+
+    merge_tiles(
+        input_dir,
+        output,
+        ensure_overview_res=2.5,
+        blocksize=128,
+        tmp_dir=tmp_dir,
+        keep_intermediate=True,
+    )
+
+    assert output.exists()
+    assert not list(output_dir.glob("*.base.tmp.tif"))
+    assert not list(output_dir.glob("*.mosaic.vrt"))
+    assert list(tmp_dir.glob("*.base.tmp.tif"))
+    assert list(tmp_dir.glob("*.mosaic.vrt"))
+
+
+def test_merge_disk_preflight_blocks_by_default(
+    tile_grid_2x2: tuple[Path, dict[tuple[int, int], np.ndarray]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir, _arrays = tile_grid_2x2
+    output = input_dir.parent / "merged.tif"
+
+    import cog_recipe.merge as merge_mod
+
+    def _no_space(**_kwargs: object) -> str:
+        from cog_recipe.errors import DiskPreflightError as _Err
+
+        raise _Err("simulated: not enough free space")
+
+    monkeypatch.setattr(merge_mod.resources, "check_disk_space", _no_space)
+
+    with pytest.raises(DiskPreflightError, match="simulated"):
+        merge_tiles(input_dir, output, ensure_overview_res=2.5, blocksize=128)
+
+    assert not output.exists()
+
+
+def test_merge_disk_preflight_force_bypasses(
+    tile_grid_2x2: tuple[Path, dict[tuple[int, int], np.ndarray]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir, _arrays = tile_grid_2x2
+    output = input_dir.parent / "merged.tif"
+
+    import cog_recipe.merge as merge_mod
+
+    real_check = merge_mod.resources.check_disk_space
+
+    def _force_only(**kwargs: object) -> str:
+        assert kwargs["force"] is True
+        return real_check(**kwargs)
+
+    monkeypatch.setattr(merge_mod.resources, "check_disk_space", _force_only)
+
+    result = merge_tiles(input_dir, output, ensure_overview_res=2.5, blocksize=128, force=True)
+    assert result.output_path.exists()
+
+
+def test_merge_fast_scan_produces_same_result(
+    tile_grid_2x2: tuple[Path, dict[tuple[int, int], np.ndarray]],
+) -> None:
+    input_dir, _arrays = tile_grid_2x2
+    output = input_dir.parent / "merged_fast.tif"
+
+    result = merge_tiles(
+        input_dir,
+        output,
+        ensure_overview_res=2.5,
+        blocksize=128,
+        fast_scan=True,
+        scan_workers=4,
+    )
+    assert result.tile_count == 4
+    is_valid, errors, _ = cog_validate(str(output))
+    assert is_valid, errors

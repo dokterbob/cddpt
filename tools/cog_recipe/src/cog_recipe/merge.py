@@ -30,15 +30,18 @@ Pipeline, all via `rasterio`'s bundled GDAL (see ``gdal_support.py`` /
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import rasterio
 import rasterio.shutil as rio_shutil
 from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from rasterio.windows import Window
 
+from cog_recipe import resources
 from cog_recipe.atomic import cleanup_stray_tmp, tmp_path_for
 from cog_recipe.gdal_support import check_lerc_zstd_support
 from cog_recipe.grid import Bounds, clamp, snap_outward, union_bounds
@@ -68,6 +71,9 @@ class MergeResult:
     overview_factors: list[int]
     ensure_overview_res: float
     output_bytes: int
+    gdal_pool_size: int
+    gdal_cache_mb: int
+    bigtiff: str
 
 
 def merge_tiles(
@@ -84,6 +90,12 @@ def merge_tiles(
     overview_resampling: str = DEFAULT_OVERVIEW_RESAMPLING,
     keep_intermediate: bool = False,
     gdal_num_threads: str = "ALL_CPUS",
+    cache_mb: int | None = None,
+    pool_size: int | None = None,
+    tmp_dir: Path | None = None,
+    force: bool = False,
+    scan_workers: int | None = None,
+    fast_scan: bool = False,
     progress: ProgressCallback | None = None,
 ) -> MergeResult:
     """Build one seamless COG mosaic from the GeoTIFF tiles in ``input_dir``.
@@ -91,17 +103,39 @@ def merge_tiles(
     ``ensure_overview_res=None`` skips the guaranteed-overview machinery
     entirely (plain power-of-2 pyramid); the default guarantees a 10 m
     level for `gdal_contour` (see README).
+
+    National-scale tuning (see docs/build-cog.md "National-scale runs"):
+    ``cache_mb``/``pool_size`` set ``GDAL_CACHEMAX``/``GDAL_MAX_DATASET_POOL_SIZE``
+    for the whole pipeline (defaults: :func:`resources.resolve_cache_mb`,
+    :func:`resources.resolve_pool_size`); ``tmp_dir`` places the intermediate
+    mosaic VRT and base GeoTIFF on a different filesystem than ``output_path``
+    (useful for splitting the disk-space preflight's peak-usage estimate, or
+    for capacity reasons); ``force`` skips that disk-space preflight;
+    ``scan_workers``/``fast_scan`` tune the initial tile scan (see
+    ``tileset.load_tile_set``).
     """
 
     check_lerc_zstd_support()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cleanup_stray_tmp(output_path.parent)
 
+    resolved_pool_size = resources.resolve_pool_size(pool_size)
+    resolved_cache_mb = resources.resolve_cache_mb(cache_mb)
+    fd_warning = resources.ensure_fd_capacity(resolved_pool_size)
+    if fd_warning is not None:
+        warnings.warn(fd_warning, stacklevel=2)
+        report(progress, ProgressEvent("preflight", 0, 0, f"warning: {fd_warning}"))
+
     report(progress, ProgressEvent("scan", 0, 0, f"scanning {input_dir}"))
     paths = scan_tiles(input_dir, pattern)
     if not paths:
         raise ValueError(f"no tiles matching {pattern!r} found in {input_dir}")
-    tile_set = load_tile_set(paths, nodata_override=nodata)
+    tile_set = load_tile_set(
+        paths,
+        nodata_override=nodata,
+        max_workers=scan_workers,
+        fast_validate=fast_scan,
+    )
     report(progress, ProgressEvent("scan", len(paths), len(paths), f"{len(paths)} tiles"))
 
     mosaic_bounds = union_bounds([t.bounds for t in tile_set.tiles])
@@ -124,12 +158,38 @@ def merge_tiles(
         [ensure_overview_res] if guarantee_needed and ensure_overview_res is not None else []
     )
 
-    vrt_path = output_path.with_name(output_path.name + ".mosaic.vrt")
-    base_path = output_path.with_name(output_path.name + ".base.tmp.tif")
+    intermediate_dir = tmp_dir if tmp_dir is not None else output_path.parent
+    intermediate_dir.mkdir(parents=True, exist_ok=True)
+    if tmp_dir is not None:
+        cleanup_stray_tmp(intermediate_dir)
+    vrt_path = intermediate_dir / (output_path.name + ".mosaic.vrt")
+    base_path = intermediate_dir / (output_path.name + ".base.tmp.tif")
     final_tmp = tmp_path_for(output_path)
 
+    dtype_size = np.dtype(tile_set.dtype).itemsize
+    base_uncompressed_bytes = resources.estimate_uncompressed_bytes(width, height, dtype_size)
+    final_uncompressed_bytes = resources.estimate_final_cog_bytes(base_uncompressed_bytes)
+    bigtiff = resources.choose_bigtiff(base_uncompressed_bytes)
+    preflight_summary = resources.check_disk_space(
+        base_dir=base_path.parent,
+        final_dir=output_path.parent,
+        base_bytes=base_uncompressed_bytes,
+        final_bytes=final_uncompressed_bytes,
+        force=force,
+    )
+    report(progress, ProgressEvent("preflight", 1, 1, preflight_summary))
+
     try:
-        with rasterio.Env(GDAL_NUM_THREADS=gdal_num_threads):
+        with rasterio.Env(
+            GDAL_NUM_THREADS=gdal_num_threads,
+            GDAL_MAX_DATASET_POOL_SIZE=str(resolved_pool_size),
+            # rasterio special-cases GDAL_CACHEMAX and calls GDALSetCacheMax64()
+            # directly (see rasterio/_env.pyx set_gdal_config), bypassing GDAL's
+            # usual config-option string parsing entirely -- so it needs a real
+            # int in *bytes*, not the MB-or-bytes-depending-on-magnitude string
+            # GDAL_CACHEMAX normally accepts as an env var / CPL config option.
+            GDAL_CACHEMAX=resolved_cache_mb * 1024 * 1024,
+        ):
             report(progress, ProgressEvent("vrt", 0, 1, "building mosaic VRT"))
             build_mosaic_vrt(
                 tile_set.tiles,
@@ -155,6 +215,7 @@ def merge_tiles(
                 compress=compress,
                 blocksize=blocksize,
                 crs=tile_set.crs,
+                bigtiff=bigtiff,
                 progress=progress,
             )
             report(progress, ProgressEvent("base-write", 1, 1, str(base_path)))
@@ -182,7 +243,7 @@ def merge_tiles(
                     BLOCKSIZE=blocksize,
                     OVERVIEWS="FORCE_USE_EXISTING",
                     RESAMPLING=overview_resampling.upper(),
-                    BIGTIFF="IF_SAFER",
+                    BIGTIFF=bigtiff,
                     NUM_THREADS=gdal_num_threads,
                 )
             report(progress, ProgressEvent("cog-encode", 1, 1, ""))
@@ -218,6 +279,9 @@ def merge_tiles(
         overview_factors=factors,
         ensure_overview_res=ensure_overview_res if ensure_overview_res is not None else resolution,
         output_bytes=output_path.stat().st_size,
+        gdal_pool_size=resolved_pool_size,
+        gdal_cache_mb=resolved_cache_mb,
+        bigtiff=bigtiff,
     )
 
 
@@ -258,6 +322,7 @@ def _write_base_raster(
     compress: str,
     blocksize: int,
     crs: CRS,
+    bigtiff: str,
     progress: ProgressCallback | None,
 ) -> None:
     """Stream the (optionally clipped) mosaic into a compressed base GeoTIFF.
@@ -265,6 +330,8 @@ def _write_base_raster(
     Full-extent case: a single GDAL `CreateCopy` (streamed block-by-block at
     the C level, never the whole raster in a numpy array). Clipped case: a
     manual per-block loop bounded to one block's worth of memory at a time.
+    ``bigtiff`` is ``"YES"`` once the estimated uncompressed mosaic exceeds
+    ~2 GB, else ``"IF_SAFER"`` (see ``resources.choose_bigtiff``).
     """
 
     no_clip = clip_bounds == mosaic_bounds
@@ -279,7 +346,7 @@ def _write_base_raster(
                 blockysize=blocksize,
                 compress=compress.upper(),
                 nodata=nodata,
-                BIGTIFF="IF_SAFER",
+                BIGTIFF=bigtiff,
             )
             return
 
@@ -305,7 +372,7 @@ def _write_base_raster(
             blockxsize=blocksize,
             blockysize=blocksize,
             compress=compress.upper(),
-            BIGTIFF="IF_SAFER",
+            BIGTIFF=bigtiff,
         ) as dst:
             block_windows = list(dst.block_windows(1))
             total = len(block_windows)

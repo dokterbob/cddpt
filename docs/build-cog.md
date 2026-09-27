@@ -82,15 +82,53 @@ build-cog merge INPUT_DIR OUTPUT.tif
   --nodata FLOAT [source; -999 if unset]  --ensure-overview-res FLOAT [10.0]
   --compress TEXT [lerc_zstd]  --blocksize INT [512]  --overview-resampling TEXT [average]
   --keep-intermediate/--no-keep-intermediate [off]  --gdal-threads TEXT [ALL_CPUS]
+  --cache-mb INT [min(25% RAM, 8192)]  --pool-size INT [env GDAL_MAX_DATASET_POOL_SIZE or 1000]
+  --tmp-dir PATH [OUTPUT's directory]  --force [off]
+  --scan-workers INT [~4x CPU count, capped at 32]  --fast-scan [off]
 
 build-cog convert INPUT_DIR OUTPUT_DIR   # secondary: per-tile COGs, 1:1 output tree
   --pattern TEXT [*.tif]  --max-z-error FLOAT [0.05]  --compress TEXT [lerc_zstd]
   --blocksize INT [512]  --overview-resampling TEXT [average]  --nodata FLOAT [source]
   --resume/--force [resume]  --log-file PATH  --report-file PATH
+
+build-cog plan-regions INPUT_DIR --region-grid KM   # prints per-region `merge` commands
+  --pattern TEXT [*.tif]  --ensure-overview-res FLOAT [10.0]  --output-dir PATH [regions]
 ```
 
 Verify directly against the installed tool: `uv run --project tools/cog_recipe build-cog --help`,
 `... build-cog merge --help`, `... build-cog convert --help`.
+
+## National-scale runs
+
+Mainland Portugal is ~91,202 tiles per collection: MDT-50cm ~1.46 TB in (mosaic ~1.12M x
+0.44M px, ~490 Gpx), MDT-2m ~95 GB in (~30 Gpx). **Recommended approach**: MDT-2m — the
+whole country in one `merge` call (well within a single streamed pass, see "Pipeline"
+above). MDT-50cm — merge by region, not the whole country at once (`build-cog plan-regions
+INPUT_DIR --region-grid 50` prints a `--bbox`-clipped `merge` invocation per region, snapped
+to the overview grid so regions stay pixel-aligned; run them sequentially or in parallel).
+
+At this scale, GDAL's own defaults (sized for a handful of files) need raising, and a
+multi-hour run benefits from failing fast rather than partway through:
+
+- `--pool-size` (`GDAL_MAX_DATASET_POOL_SIZE`, default 1000): a full-width 0.5 m block row
+  touches 500+ source tiles at once, above GDAL's own ~100 default. The process's
+  file-descriptor limit is checked (`resource.getrlimit`) and raised toward its hard limit if
+  needed, with a warning if that's not enough headroom.
+- `--cache-mb` (`GDAL_CACHEMAX`, default `min(25% of detected RAM, 8192)` MB, via
+  `os.sysconf` — no `psutil`).
+- `BIGTIFF` is automatic: `YES` once the estimated uncompressed mosaic exceeds ~2 GB (a 0.5 m
+  national mosaic is ~2 TB uncompressed), `IF_SAFER` below that.
+- A disk-space preflight estimates peak usage (intermediate base + final COG, both
+  *uncompressed* upper bounds) against free space before writing anything, failing fast
+  unless `--force`; `--tmp-dir` places the intermediate on a different filesystem.
+- The initial tile scan (opening all 91k files to read georeferencing — sequentially ~150
+  files/s, ~10 min) now runs in a thread pool by default (`rasterio.open()` releases the
+  GIL); `--fast-scan` additionally validates CRS/dtype/pixel-size/rotation on a sample only,
+  for trusted, consistently-named DGT tile sets. Measured on synthetic tiles: no speedup over
+  sequential on this dev machine's fast local disk (already near-zero open latency), but
+  ~2x at 16-32 workers with an artificial 5 ms per-open latency injected (closer to a
+  network-mounted source) — see `tools/cog_recipe/README.md` "National-scale runs" for the
+  full write-up and numbers.
 
 ## Install / run
 

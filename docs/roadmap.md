@@ -62,8 +62,9 @@ Each phase follows *build → independent review → fix → re-review*. Checkpo
 
 ## Deferred / policy
 
-- DGT outreach (courtesy email, acceptable automated-access rates, API token path) —
-  deliberately deferred until the tool works.
+- DGT outreach — decided against proactive contact; if DGT gets in touch, explain the free
+  streamable COG / torrent redistribution intent (check the collection licence first: DGT
+  declares `proprietary`).
 - Rate limits uncharacterized — conservative defaults (2 concurrent, 2 req/s, whole-run
   circuit breaker); relax only on real evidence.
 - DGT metadata license is contradictory — surface `collection.license` verbatim and print an

@@ -155,6 +155,86 @@ trade-off above. Key `merge` options:
 | `--overview-resampling` | `average` | Resampling for building overviews from the merged raster |
 | `--keep-intermediate` | off | Keep the intermediate mosaic VRT + base GeoTIFF |
 | `--gdal-threads` | `ALL_CPUS` | `GDAL_NUM_THREADS` for the streaming copy/encode steps |
+| `--cache-mb` | `min(25% RAM, 8192)` | `GDAL_CACHEMAX` (MB) for the whole pipeline |
+| `--pool-size` | env `GDAL_MAX_DATASET_POOL_SIZE` or `1000` | `GDAL_MAX_DATASET_POOL_SIZE` -- open source tiles GDAL keeps cached |
+| `--tmp-dir` | OUTPUT's directory | Directory for the intermediate mosaic VRT + base GeoTIFF |
+| `--force` | off | Skip the disk-space preflight check |
+| `--scan-workers` | ~4x CPU count, capped at 32 | Thread-pool size for the initial tile scan |
+| `--fast-scan` | off | Cross-validate CRS/dtype/pixel-size/rotation on a sample only |
+
+See "National-scale runs" below for what these are for and how to size them for a
+91,000-tile mainland-Portugal merge.
+
+### National-scale runs
+
+Mainland Portugal is ~91,202 tiles per collection: MDT-50cm is ~1.46 TB in (2000x2000 px,
+0.5 m, mosaic ~1.12M x 0.44M px, ~490 Gpx); MDT-2m is ~95 GB in (~30 Gpx). At that scale,
+GDAL's own defaults, sized for a handful of files, need raising -- and a single multi-hour
+run benefits from being checked *before* it starts, not partway through.
+
+**Recommended approach**:
+
+- **MDT-2m**: the whole country in one `merge` call. ~30 Gpx is well within what a single
+  streamed pass handles comfortably (see "Mosaic-first, not per-tile-then-mosaic" above --
+  no full-mosaic array is ever held in memory regardless of extent).
+- **MDT-50cm**: merge by region, not the whole country in one call. ~490 Gpx makes one run's
+  peak-disk footprint and multi-hour-with-no-incremental-progress profile impractical; use
+  `build-cog plan-regions` (below) to generate a set of `--bbox`-clipped `merge` invocations
+  instead, one per region, run sequentially or in parallel across machines/disks.
+
+**Tuning flags** (all have sane defaults; override only if the defaults don't fit your
+machine):
+
+- **`--pool-size`** (`GDAL_MAX_DATASET_POOL_SIZE`, default `1000`): a full-width 0.5 m block
+  row touches 500+ source tiles at once (each a `<SimpleSource>` in the mosaic VRT); GDAL's
+  own compiled-in default (~100) is well below that, risking open/close thrashing on the
+  source tile handles. `merge` also checks the process's file-descriptor limit
+  (`resource.getrlimit(RLIMIT_NOFILE)`) and raises the soft limit toward the hard limit if
+  `--pool-size` needs more headroom than it currently has, with a clear warning printed (and
+  a Python `UserWarning`) if it can't get enough.
+- **`--cache-mb`** (`GDAL_CACHEMAX`, default `min(25% of detected RAM, 8192)` MB): GDAL's
+  block cache across the whole pipeline. RAM is detected via `os.sysconf` (no `psutil`
+  dependency); if it can't be detected, a conservative 4096 MB fallback is used.
+- **`BIGTIFF`**: automatic -- `YES` once the estimated *uncompressed* mosaic exceeds ~2 GB,
+  `IF_SAFER` (GDAL decides) below that. A 0.5 m national mosaic is ~2 TB uncompressed, well
+  past the classic-TIFF 4 GiB offset ceiling.
+- **Disk-space preflight**: before any tile data is written, `merge` estimates peak disk
+  usage -- the intermediate base GeoTIFF plus the final COG (with its overview pyramid),
+  both as *uncompressed* upper bounds (real LERC_ZSTD usage is normally far lower) -- against
+  free space on the output and, if `--tmp-dir` is given, the temp filesystem. It fails fast
+  with a clear message if the estimate exceeds free space; pass `--force` to proceed anyway.
+  Use `--tmp-dir` to put the intermediate base GeoTIFF on a different disk than the final
+  output, splitting the requirement across two filesystems instead of stacking it on one.
+- **`--scan-workers`/`--fast-scan`**: the initial tile scan opens every input file to read
+  its georeferencing. Sequentially that's ~150 files/s (~10 min for 91k tiles) --
+  `load_tile_set` now does this in a thread pool by default (`rasterio.open()` releases the
+  GIL for its GDAL call), sized to ~4x CPU count. `--fast-scan` additionally skips the
+  CRS/dtype/pixel-size/rotation cross-check on all but a sample (~200 tiles), trusting the
+  rest to share the sampled tiles' grid -- only safe for a directory of consistently-named,
+  already-trusted DGT tiles. Measured on this development machine (fast local NVMe/APFS,
+  synthetic tiles): the thread pool gave **no measurable speedup over sequential** here,
+  because file-open latency on this disk is already near zero -- the ~150 tiles/s figure is
+  CPU/GIL-bound, not I/O-wait-bound, on this hardware. With an artificial 5 ms per-open
+  latency injected (closer to a network-mounted or spinning-disk source), the same thread
+  pool gave a measured **~2x speedup** at 16-32 workers. In other words: parallelising the
+  scan is close to free insurance -- it costs nothing on fast local storage and pays off on
+  slower ones -- but isn't guaranteed to help on every machine. `--fast-scan` still trims
+  the fixed per-tile Python-side cost regardless of storage speed.
+
+**`build-cog plan-regions`**: prints `build-cog merge --bbox ...` commands tiling an input
+directory's extent into `--region-grid KM`-ish squares, each snapped to the
+`--ensure-overview-res` grid (via `grid.py`'s `snap_outward`) so every region's COG stays
+pixel- and overview-aligned with its neighbours:
+
+```console
+$ build-cog plan-regions INPUT_DIR --region-grid 50 --ensure-overview-res 10 \
+    --output-dir OUTPUT_DIR > run_regions.sh
+$ sh run_regions.sh   # or hand out lines to separate machines/processes
+```
+
+This only prints the commands -- it does not run them, and does not merge the resulting
+per-region COGs back into one file (there is no "merge of merges" step; each region's COG is
+the final deliverable for that region).
 
 ### Reading the 10 m level with `gdal_contour`
 
