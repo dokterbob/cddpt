@@ -346,14 +346,14 @@ These resolve the "open items requiring a human" and **change the download desig
 - **truststore contexts must never be shared between threads.** `truststore.SSLContext`
   (0.10.4, latest) flips the context to `CERT_NONE`/`check_hostname=False` around each
   handshake and locks only the flip, not the handshake, the restore, or the OS verification
-  that reads the same flags. With one context shared by the download threads, verification
-  could run against another thread's relaxed flags and accept an untrusted certificate without
-  a hostname check. urllib3 then emitted `InsecureRequestWarning`, and the shared context could
-  be left stuck at `CERT_NONE`. Reproduced locally: with 2 threads and a self-signed server, about
-  half the connections were accepted. Fix (`http.py`): each HTTPS connection builds its own
-  context, an unverified connection is a hard `TlsVerificationError` rather than a warning, and
-  certificate errors are not retried; they fail at once with a `--ca-bundle` hint.
-  Regression tests: `tests/test_http_tls_concurrency.py`.
+  that reads the same flags (upstream issue [#209](https://github.com/sethmlarson/truststore/issues/209)).
+  With one context shared by the download threads, verification could run against another thread's
+  relaxed flags and accept an untrusted certificate without a hostname check. urllib3 then emitted
+  `InsecureRequestWarning`, and the shared context could be left stuck at `CERT_NONE`. Reproduced
+  locally: with 2 threads and a self-signed server, about half the connections were accepted. Fix
+  (`http.py`): each HTTPS connection builds its own context, an unverified connection is a hard
+  `TlsVerificationError` rather than a warning, and certificate errors are not retried; they fail
+  at once with a `--ca-bundle` hint. Regression tests: `tests/test_http_tls_concurrency.py`.
 - **Waits are never silent.** `RequestGovernor` reports every breaker, `Retry-After` and
   retry-backoff wait to `PauseListener`s and counts them (`stats()`). The CLI shows a status
   line with a countdown above the progress bars and a throttling summary at the end. Logs,

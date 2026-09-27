@@ -62,6 +62,11 @@ to send anything over a connection urllib3 does not report as verified --
 where stock urllib3 would merely emit ``InsecureRequestWarning`` and carry on.
 Certificate-verification failures are never retried (they do not fix
 themselves with backoff); they fail fast with a pointer to ``ca_bundle``.
+
+This is upstream truststore issue `#209 <https://github.com/sethmlarson/truststore/issues/209>`_
+("Race condition on context setting"), reported as open as of 2026-09-27; the workaround can
+be reconsidered once a truststore release fixes it (the "refuse unverified connections" check
+should stay regardless).
 """
 
 from __future__ import annotations
