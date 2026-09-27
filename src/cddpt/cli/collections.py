@@ -19,7 +19,7 @@ from . import _common
 
 app = typer.Typer(
     name="collections",
-    help=f"Browse CDD collections. {_common.DISCLAIMER}",
+    help="Browse CDD collections.",
     no_args_is_help=True,
 )
 
@@ -53,7 +53,7 @@ def _collection_to_dict(info: CollectionInfo) -> dict[str, Any]:
     }
 
 
-@app.command("list", help=f"List CDD collections. {_common.DISCLAIMER}")
+@app.command("list", help="List CDD collections.")
 @_common.handle_errors
 def list_collections(
     all_: bool = typer.Option(
@@ -94,7 +94,7 @@ def list_collections(
 @app.command(
     "show",
     help="Show one collection's details, including its licence exactly as declared "
-    f"by DGT (cddpt never asserts a licence of its own). {_common.DISCLAIMER}",
+    "by DGT (cddpt never asserts a licence of its own).",
 )
 @_common.handle_errors
 def show_collection(

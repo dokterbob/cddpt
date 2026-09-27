@@ -88,12 +88,15 @@ def test_top_level_help_contains_disclaimer(runner: CliRunner) -> None:
         ["collections", "list", "--help"],
         ["collections", "show", "--help"],
         ["search", "--help"],
+        ["download", "--help"],
+        ["auth", "--help"],
     ],
 )
-def test_every_command_help_contains_disclaimer(runner: CliRunner, args: list[str]) -> None:
+def test_subcommand_help_omits_disclaimer(runner: CliRunner, args: list[str]) -> None:
+    # Stated once, in the top-level help (and README) -- not repeated per command.
     result = runner.invoke(app, args)
     assert result.exit_code == _common.EXIT_OK
-    assert _normalize_ws(_common.DISCLAIMER) in _normalize_ws(result.stdout)
+    assert _normalize_ws(_common.DISCLAIMER) not in _normalize_ws(result.stdout)
 
 
 def test_version(runner: CliRunner) -> None:

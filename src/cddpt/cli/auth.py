@@ -29,14 +29,12 @@ from ..auth.store import CredentialStore
 from ..errors import AuthError
 from . import _common
 
-app = typer.Typer(
-    name="auth", help=f"Manage CDD authentication. {_common.DISCLAIMER}", no_args_is_help=True
-)
+app = typer.Typer(name="auth", help="Manage CDD authentication.", no_args_is_help=True)
 
 _stdout = Console()
 
 
-@app.command("login", help=f"Log in to CDD and cache the session. {_common.DISCLAIMER}")
+@app.command("login", help="Log in to CDD and cache the session.")
 @_common.handle_errors
 def login(
     username: Annotated[
@@ -100,7 +98,7 @@ def login(
     _stdout.print(f"[green]logged in[/green] (session valid until {session.expires_at:%H:%M} UTC)")
 
 
-@app.command("status", help=f"Show the current auth session's status. {_common.DISCLAIMER}")
+@app.command("status", help="Show the current auth session's status.")
 @_common.handle_errors
 def status() -> None:
     settings = _common.build_settings()
@@ -142,7 +140,7 @@ def status() -> None:
 
 @app.command(
     "logout",
-    help=f"Purge every cddpt keyring entry (password, username, session). {_common.DISCLAIMER}",
+    help="Purge every cddpt keyring entry (password, username, session).",
 )
 @_common.handle_errors
 def logout() -> None:
@@ -153,8 +151,7 @@ def logout() -> None:
 
 @app.command(
     "doctor",
-    help=f"Run auth capability checks (TLS, login page, credentials, keyring). "
-    f"{_common.DISCLAIMER}",
+    help="Run auth capability checks (TLS, login page, credentials, keyring). ",
 )
 @_common.handle_errors
 def doctor(

@@ -19,15 +19,14 @@ from .search import search_command
 
 app = typer.Typer(
     name="cddpt",
-    help=f"cddpt: unofficial CLI for DGT's CDD geodata portal.\n\n{_common.DISCLAIMER}",
     add_completion=False,
     no_args_is_help=True,
 )
 
 app.add_typer(auth_app, name="auth")
 app.add_typer(collections_app, name="collections")
-app.command("search", help=f"Search a collection/AOI. {_common.DISCLAIMER}")(search_command)
-app.command("download", help=f"Download matching assets. {_common.DISCLAIMER}")(download_command)
+app.command("search", help="Search a collection/AOI.")(search_command)
+app.command("download", help="Download matching assets.")(download_command)
 
 
 def _version_callback(value: bool) -> None:
@@ -36,7 +35,9 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.callback(help=f"cddpt: unofficial CLI for DGT's CDD geodata portal.\n\n{_common.DISCLAIMER}")
+@app.callback(
+    help=f"Search and download data from DGT's CDD geodata portal.\n\n{_common.DISCLAIMER}"
+)
 def main_callback(
     verbose: Annotated[
         bool,
