@@ -611,7 +611,8 @@ def test_throttling_summary_reports_counts_and_paused_time(
     )
     out = capsys.readouterr().out
     assert "7 HTTP 429/503 response(s)" in out
-    assert "circuit breaker opened 1 time(s)" in out
+    # Rich may wrap plain captured output at the platform console width.
+    assert "circuit breaker opened 1 time(s)" in " ".join(out.split())
     assert "10:12 in total" in out
 
 
