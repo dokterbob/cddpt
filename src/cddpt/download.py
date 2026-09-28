@@ -105,7 +105,7 @@ from tenacity import (
 
 from .auth.base import AuthManager, AuthSession, is_login_redirect
 from .catalog import CddCatalog
-from .errors import ConfigError, DownloadError, InsufficientDiskSpace
+from .errors import AuthError, ConfigError, DownloadError, InsufficientDiskSpace
 from .http import make_session
 from .models import AssetRef, DownloadOutcome, DownloadStatus
 from .naming import Layout
@@ -679,7 +679,9 @@ class Downloader:
         ``KeyboardInterrupt`` is re-raised after every in-flight thread has
         wound down, so a caller can distinguish "interrupted" from
         "completed" while still being sure nothing was left in an
-        inconsistent state.
+        inconsistent state. An :class:`~cddpt.errors.AuthError` also aborts
+        the run: authentication is shared, so retrying it per asset cannot
+        recover the batch.
         """
 
         event = cancel_event if cancel_event is not None else threading.Event()
@@ -781,6 +783,8 @@ class Downloader:
             self._finalize(planned, total)
         except _Cancelled:
             return None
+        except AuthError:
+            raise
         except Exception as exc:
             # Any failure becomes a recorded, per-asset outcome rather than
             # aborting the whole run.

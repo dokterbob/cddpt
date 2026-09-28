@@ -27,7 +27,7 @@ from shapely.geometry import Point
 from cddpt.auth.base import AuthManager, AuthProvider, AuthSession, utcnow
 from cddpt.catalog import CddCatalog
 from cddpt.download import Downloader, DownloadPlan, PlannedDownload, ProgressCallback
-from cddpt.errors import DownloadError, InsufficientDiskSpace
+from cddpt.errors import AuthError, DownloadError, InsufficientDiskSpace
 from cddpt.models import AssetRef, DownloadOutcome, DownloadStatus
 from cddpt.naming import ByCollectionLayout, ByTileLayout, FlatLayout
 from cddpt.ratelimit import RequestGovernor
@@ -665,6 +665,29 @@ def test_login_redirect_mid_run_triggers_single_shared_reauth(tmp_path: Path) ->
     # docstring and download.py's module docstring, point 2.
     assert provider.authenticate_calls == 1
     assert provider.refresh_calls == 1
+
+
+@responses.activate
+def test_login_redirect_mid_run_aborts_when_reauthentication_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+    auth = _simple_auth_manager()
+    downloader = _downloader(catalog=catalog, auth=auth, governor=governor)
+
+    asset = _asset(size_bytes=1000)
+    _register_mint(asset, "tok-1")
+    _register_exchange_redirect("tok-1", LOGIN_URL)
+
+    def fail_reauthentication(_failed_session: AuthSession) -> AuthSession:
+        raise AuthError("cddpt: could not find a login form on the Keycloak page")
+
+    monkeypatch.setattr(auth, "on_unauthorized", fail_reauthentication)
+
+    plan = downloader.plan([asset], tmp_path, ByCollectionLayout())
+    with pytest.raises(AuthError, match="could not find a login form"):
+        downloader.run(plan)
 
 
 # ---------------------------------------------------------------------------
