@@ -203,6 +203,11 @@ class KeycloakFormAuthProvider:
 
     def authenticate(self) -> AuthSession:
         username, password = self._resolve_credentials()
+        # Renewal starts before CDD's absolute session expiry. Keeping the
+        # old CDD/Keycloak cookies can bypass the form and land directly on
+        # /dgt-fe/downloads, without establishing a fresh 30-minute session.
+        # Keep the governed HTTP connection pool, but start a clean login.
+        self.invalidate()
         return self._login(username, password)
 
     def refresh(self, session: AuthSession) -> AuthSession:
@@ -212,9 +217,7 @@ class KeycloakFormAuthProvider:
         return self.authenticate()
 
     def invalidate(self) -> None:
-        # Nothing cached locally beyond the governed session's own cookie
-        # jar, which a fresh authenticate() naturally overwrites.
-        pass
+        self._session.cookies.clear()
 
     def _resolve_credentials(self) -> tuple[str, SecretStr]:
         if self._explicit_username is not None and self._explicit_password is not None:

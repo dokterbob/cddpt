@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ import requests
 import responses
 from pydantic import SecretStr
 
-from cddpt.auth.base import SESSION_TTL, AuthSession
+from cddpt.auth.base import SESSION_TTL, AuthManager, AuthSession
 from cddpt.auth.form_provider import KeycloakFormAuthProvider, parse_login_page
 from cddpt.auth.store import CredentialStore
 from cddpt.errors import AuthError
@@ -165,6 +166,52 @@ def test_direct_auth_login_entrypoint_also_completes() -> None:
     provider = _provider(username="u", password=SecretStr("p"))
     session = provider.authenticate()
     assert "connect.sid" in session.cookies
+
+
+# ---------------------------------------------------------------------------
+# Session renewal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("shortcut", ["site", "keycloak"])
+@pytest.mark.parametrize("renewal", ["proactive", "unauthorized"])
+@responses.activate
+def test_renewal_starts_a_fresh_login(shortcut: str, renewal: str) -> None:
+    """An existing CDD or SSO session skips the form without renewing its TTL."""
+    _register_get_login_redirect()
+    _register_successful_post("first")
+    clock = [datetime(2026, 1, 1, tzinfo=timezone.utc)]
+    provider = _provider(username="u", password=SecretStr("p"), clock=lambda: clock[0])
+    manager = AuthManager(settings=Settings(), provider=provider, clock=lambda: clock[0])
+    first = manager.current()
+
+    authorize_url = next(
+        call.request.url for call in responses.calls if AUTHORIZE_URL_RE.match(call.request.url)
+    )
+    responses.reset()
+
+    def login(request: requests.PreparedRequest) -> tuple[int, dict[str, str], str]:
+        if shortcut == "site" and "connect.sid=" in request.headers.get("Cookie", ""):
+            return 302, {"Location": DOWNLOADS_URL}, ""
+        return 302, {"Location": authorize_url}, ""
+
+    def authorize(request: requests.PreparedRequest) -> tuple[int, dict[str, str], str]:
+        if shortcut == "keycloak" and "AUTH_SESSION_ID=" in request.headers.get("Cookie", ""):
+            return 302, {"Location": DOWNLOADS_URL}, ""
+        return 200, {"Content-Type": "text/html"}, (FIXTURES / "login_page.html").read_text()
+
+    responses.add_callback(responses.GET, LOGIN_URL_RE, callback=login)
+    responses.add_callback(responses.GET, AUTHORIZE_URL_RE, callback=authorize)
+    _register_successful_post("renewed")
+
+    # Renew while the old server session is still valid, as in a long download.
+    clock[0] += timedelta(minutes=27)
+    second = manager.current() if renewal == "proactive" else manager.on_unauthorized(first)
+    assert second.cookies["connect.sid"] == "s%3Arenewed.sig"
+    assert second.cookies != first.cookies
+    assert second.expires_at == clock[0] + SESSION_TTL
+    assert manager.current() is second
+    assert sum(call.request.method == "POST" for call in responses.calls) == 1
 
 
 # ---------------------------------------------------------------------------
