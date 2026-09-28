@@ -24,6 +24,7 @@ Cassette provenance
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -49,10 +50,10 @@ _LISBON_BBOX = "-9.15,38.70,-9.10,38.75"
 
 def _normalize_ws(text: str) -> str:
     """Collapse all whitespace (including rich's help-text line wrapping) to
-    single spaces, so a long disclaimer string can be found as a substring
-    regardless of exactly where the terminal-width renderer wrapped it."""
+    single spaces, after removing terminal styling, so a long disclaimer
+    string can be found regardless of rendering environment."""
 
-    return " ".join(text.split())
+    return " ".join(re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text).split())
 
 
 @pytest.fixture(autouse=True)

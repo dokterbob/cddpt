@@ -12,6 +12,8 @@ it).
 
 from __future__ import annotations
 
+import json
+import math
 import os
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -34,6 +36,37 @@ CASSETTE_DIR = Path(__file__).parent / "cassettes"
 _RESPONSE_HEADERS_TO_SCRUB = {"set-cookie", "cookie"}
 
 
+def _json_values_match(first: Any, second: Any) -> bool:
+    """Compare decoded JSON while tolerating projection round-off."""
+
+    if isinstance(first, float) and isinstance(second, float):
+        return math.isclose(first, second, rel_tol=0.0, abs_tol=1e-12)
+    if isinstance(first, list) and isinstance(second, list):
+        return len(first) == len(second) and all(
+            _json_values_match(left, right) for left, right in zip(first, second, strict=True)
+        )
+    if isinstance(first, dict) and isinstance(second, dict):
+        return first.keys() == second.keys() and all(
+            _json_values_match(first[key], second[key]) for key in first
+        )
+    return first == second
+
+
+def _json_body_matcher(first: Any, second: Any) -> None:
+    """Match JSON request bodies, allowing insignificant coordinate round-off.
+
+    Reprojecting an AOI can yield platform-dependent float representations
+    that differ by approximately 1e-14 degrees.  A 1e-12 absolute tolerance
+    is far smaller than any meaningful AOI distinction, while fields such as
+    collection IDs and pagination tokens still require exact matches.
+    """
+
+    first_body = json.loads(first.body or b"null")
+    second_body = json.loads(second.body or b"null")
+    if not _json_values_match(first_body, second_body):
+        raise AssertionError("JSON request bodies differ")
+
+
 def _scrub_response_headers(response: Mapping[str, Any]) -> Mapping[str, Any]:
     headers = response.get("headers")
     if isinstance(headers, dict):
@@ -46,18 +79,20 @@ def _scrub_response_headers(response: Mapping[str, Any]) -> Mapping[str, Any]:
 @pytest.fixture
 def cdd_vcr() -> vcr_module.VCR:
     record_mode = os.environ.get("CDDPT_VCR_RECORD", "none")
-    # match_on includes vcrpy's built-in "body" matcher (not just
+    # match_on includes a JSON body matcher (not just
     # method/URL): needed because /search POSTs differ only in JSON body
     # across AOI chunks and pagination tokens -- method+URL alone would
     # conflate them.
-    return vcr_module.VCR(
+    cdd_vcr = vcr_module.VCR(
         cassette_library_dir=str(CASSETTE_DIR),
         record_mode=record_mode,
-        match_on=["method", "scheme", "host", "port", "path", "query", "body"],
+        match_on=["method", "scheme", "host", "port", "path", "query", "json_body"],
         filter_headers=["Cookie", "Set-Cookie", "Authorization"],
         before_record_response=_scrub_response_headers,
         decode_compressed_response=True,
     )
+    cdd_vcr.register_matcher("json_body", _json_body_matcher)
+    return cdd_vcr
 
 
 @pytest.fixture
