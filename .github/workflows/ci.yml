@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Run tests
+        run: uv run --frozen pytest
+
+  lint:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run --frozen ruff check .
+      - name: Type-check
+        run: uv run --frozen mypy
+
+  build-cog:
+    name: build-cog checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/cog_recipe
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: tools/cog_recipe/uv.lock
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run --frozen ruff check .
+      - name: Type-check
+        run: uv run --frozen mypy
+      - name: Run tests
+        run: uv run --frozen pytest
