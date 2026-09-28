@@ -633,7 +633,9 @@ def test_size_mismatch_fails_and_keeps_part_file(tmp_path: Path) -> None:
 
 
 @responses.activate
-def test_login_redirect_mid_run_triggers_single_shared_reauth(tmp_path: Path) -> None:
+def test_login_redirect_mid_run_triggers_single_shared_reauth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     governor = _fast_governor()
     catalog = CddCatalog(settings=_settings(), governor=governor)
 
@@ -654,6 +656,21 @@ def test_login_redirect_mid_run_triggers_single_shared_reauth(tmp_path: Path) ->
         # Second exchange attempt (after the shared re-auth): success.
         _register_exchange_redirect(token, presigned)
         responses.add(responses.GET, presigned, status=200, body=b"x" * 1000)
+
+    # Hold both workers at the point where they have observed the stale
+    # session. Without this, a fast worker can refresh before its peer makes
+    # the mocked first exchange; that peer would then receive the fixture's
+    # stale-login redirect *while holding the new session*, which correctly
+    # causes a second refresh in production but is not the race this test is
+    # intended to exercise.
+    both_rejected = threading.Barrier(2)
+    original_on_unauthorized = auth.on_unauthorized
+
+    def synchronize_reauth(failed_session: AuthSession | None = None) -> AuthSession:
+        both_rejected.wait(timeout=10)
+        return original_on_unauthorized(failed_session)
+
+    monkeypatch.setattr(auth, "on_unauthorized", synchronize_reauth)
 
     plan = downloader.plan([asset_a, asset_b], tmp_path, ByCollectionLayout())
     outcomes = downloader.run(plan, concurrency=2)

@@ -21,6 +21,7 @@ import contextlib
 import http.server
 import socketserver
 import ssl
+import sys
 import threading
 import time
 import warnings
@@ -164,6 +165,13 @@ def test_concurrent_requests_to_an_untrusted_server_are_all_rejected_fast(
     assert "localhost" in message
 
 
+@pytest.mark.skipif(
+    sys.platform.startswith("linux"),
+    reason=(
+        "truststore's OpenSSL backend verifies during the handshake; its "
+        "post-handshake OS-verifier hook is a no-op"
+    ),
+)
 def test_os_verification_never_sees_a_relaxed_context_under_concurrency(
     tls_server: _TlsServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -171,7 +179,11 @@ def test_os_verification_never_sees_a_relaxed_context_under_concurrency(
     time between switching a context to CERT_NONE and restoring it) and
     record the context state the OS verifier is handed. With a shared
     context this records CERT_NONE / check_hostname=False on nearly every
-    run; with per-connection contexts, never."""
+    run; with per-connection contexts, never.
+
+    Linux uses truststore's OpenSSL backend, which performs verification in
+    the handshake instead of the post-handshake OS-verifier hook patched
+    below. The fail-closed handshake test above covers that backend."""
 
     seen: list[tuple[ssl.VerifyMode, bool]] = []
     seen_lock = threading.Lock()
