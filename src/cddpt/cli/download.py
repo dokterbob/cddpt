@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import getpass
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -268,6 +268,9 @@ class _RichProgress:
         with self._lock:
             task_id = self._progress.add_task("download", name=asset.item_id, total=total_bytes)
             self._task_ids[self._key(asset)] = task_id
+
+    def on_skipped(self, outcomes: Sequence[DownloadOutcome]) -> None:
+        """Preflight already reports these files; no transfer bars are needed."""
 
     def on_progress(self, asset: AssetRef, nbytes: int) -> None:
         with self._lock:

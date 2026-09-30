@@ -87,8 +87,8 @@ import os
 import shutil
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -369,11 +369,18 @@ class ProgressCallback(Protocol):
     here -- this library never imports ``tqdm``/``rich`` itself (per
     docs/PLAN.md: "Progress ... behind an injected callback Protocol ... QGIS
     swaps in ``QgsTask`` progress").
+
+    Implementations may additionally provide
+    ``on_skipped(outcomes: Sequence[DownloadOutcome]) -> None`` to receive
+    already-complete files in one call instead of per-file start/done
+    notifications. The sequence is borrowed for the duration of the call;
+    callbacks must not mutate or retain it.
     """
 
     def on_start(self, asset: AssetRef, total_bytes: int | None) -> None:
         """Called once per asset before any network activity for it (even
-        for a ``skipped`` outcome). ``total_bytes`` is ``asset.size_bytes``
+        for a ``skipped`` outcome, unless handled by ``on_skipped``).
+        ``total_bytes`` is ``asset.size_bytes``
         (``None`` if unknown)."""
 
     def on_progress(self, asset: AssetRef, nbytes: int) -> None:
@@ -382,7 +389,8 @@ class ProgressCallback(Protocol):
 
     def on_done(self, outcome: DownloadOutcome) -> None:
         """Called exactly once per asset that reaches a final ``DownloadOutcome``
-        (never for one left mid-flight by a cancellation)."""
+        (never for one left mid-flight by a cancellation or a skipped
+        outcome handled by ``on_skipped``)."""
 
 
 class _NullProgress:
@@ -397,6 +405,9 @@ class _NullProgress:
     def on_done(self, outcome: DownloadOutcome) -> None:
         pass
 
+    def on_skipped(self, outcomes: Sequence[DownloadOutcome]) -> None:
+        pass
+
 
 @dataclass(frozen=True, slots=True)
 class PlannedDownload:
@@ -405,6 +416,9 @@ class PlannedDownload:
     asset: AssetRef
     dest: Path
     storage_filename: str
+    #: Size observed for an already-complete file at plan time. None keeps
+    #: filesystem lookup compatible with manually constructed plans.
+    completed_size_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,8 +448,9 @@ class DownloadPlan:
 class _ManifestWriter:
     """Thread-safe, atomic JSON manifest writer.
 
-    Rewrites the whole file (never appends) on every :meth:`record` call --
-    simple and safe for the modest number of assets one run handles, and
+    Streams a snapshot on every :meth:`record` / :meth:`record_many` call,
+    with only one serialized outcome in memory at a time. Skipped files
+    are recorded together, avoiding quadratic startup work. This
     guarantees the manifest is always a single well-formed JSON document
     (even if the process is killed between writes, thanks to the
     ``.tmp`` + :func:`os.replace` swap). Never records a token, a pre-signed
@@ -448,14 +463,22 @@ class _ManifestWriter:
         self._outcomes: list[DownloadOutcome] = []
 
     def record(self, outcome: DownloadOutcome) -> None:
+        self.record_many((outcome,))
+
+    def record_many(self, outcomes: Iterable[DownloadOutcome]) -> None:
         if self._path is None:
             return
         with self._lock:
-            self._outcomes.append(outcome)
-            payload = {"outcomes": [_outcome_to_manifest_dict(o) for o in self._outcomes]}
+            self._outcomes.extend(outcomes)
             tmp_path = self._path.with_name(self._path.name + ".tmp")
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path.write_text(_dump_json(payload), encoding="utf-8")
+            with tmp_path.open("w", encoding="utf-8") as stream:
+                stream.write('{\n  "outcomes": [')
+                for index, outcome in enumerate(self._outcomes):
+                    stream.write(",\n" if index else "\n")
+                    record = _dump_json(_outcome_to_manifest_dict(outcome))
+                    stream.write("    " + record.replace("\n", "\n    "))
+                stream.write("\n  ]\n}\n")
             os.replace(tmp_path, self._path)
 
 
@@ -594,6 +617,10 @@ class Downloader:
         :class:`~cddpt.models.AssetRef` alone, and "already complete" is
         decided purely from local filesystem stats.
 
+        Already-complete file sizes are a snapshot: :meth:`run` reuses
+        them without checking those files again. Build a new plan if the
+        destination files may have changed in the meantime.
+
         Raises :class:`~cddpt.errors.InsufficientDiskSpace` if the
         filesystem holding ``out_dir`` doesn't have enough free space for
         the assets that would actually need transferring (plus a safety
@@ -612,17 +639,21 @@ class Downloader:
 
         for asset in assets:
             dest = layout.dest_for(asset, out_dir)
-            planned = PlannedDownload(asset=asset, dest=dest, storage_filename=dest.name)
 
             if asset.size_bytes is not None:
                 total_known_bytes += asset.size_bytes
             else:
                 unknown_size_count += 1
 
-            is_complete = (
-                not overwrite
-                and dest.is_file()
-                and (asset.size_bytes is None or dest.stat().st_size == asset.size_bytes)
+            observed_size = dest.stat().st_size if not overwrite and dest.is_file() else None
+            is_complete = observed_size is not None and (
+                asset.size_bytes is None or observed_size == asset.size_bytes
+            )
+            planned = PlannedDownload(
+                asset=asset,
+                dest=dest,
+                storage_filename=dest.name,
+                completed_size_bytes=observed_size if is_complete else None,
             )
             if is_complete:
                 already_complete.append(planned)
@@ -686,14 +717,16 @@ class Downloader:
 
         event = cancel_event if cancel_event is not None else threading.Event()
         manifest = _ManifestWriter(manifest_path)
-        outcomes: list[DownloadOutcome] = []
-
-        for planned in plan.already_complete:
-            self._progress.on_start(planned.asset, planned.asset.size_bytes)
-            outcome = self._skip_outcome(planned)
-            self._progress.on_done(outcome)
-            manifest.record(outcome)
-            outcomes.append(outcome)
+        outcomes = [self._skip_outcome(planned) for planned in plan.already_complete]
+        if outcomes:
+            on_skipped = getattr(self._progress, "on_skipped", None)
+            if callable(on_skipped):
+                on_skipped(outcomes)
+            else:
+                for outcome in outcomes:
+                    self._progress.on_start(outcome.asset, outcome.asset.size_bytes)
+                    self._progress.on_done(outcome)
+            manifest.record_many(outcomes)
 
         if not plan.to_download:
             return outcomes
@@ -739,22 +772,43 @@ class Downloader:
 
         try:
             with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
-                futures = [
-                    executor.submit(self._worker, planned, event, manifest)
-                    for planned in plan.to_download
-                ]
-                for future in as_completed(futures):
-                    result = future.result()
-                    if result is not None:
-                        outcomes.append(result)
-        except BaseException:
-            event.set()
-            raise
+                pending: set[Future[DownloadOutcome | None]] = set()
+                remaining = iter(plan.to_download)
+
+                def fill_queue() -> None:
+                    while len(pending) < 2 * effective_concurrency and not event.is_set():
+                        planned = next(remaining, None)
+                        if planned is None:
+                            break
+                        pending.add(executor.submit(self._worker, planned, event, manifest))
+
+                try:
+                    fill_queue()
+                    while pending:
+                        done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            result = future.result()
+                            if result is not None:
+                                outcomes.append(result)
+                        done.clear()
+                        del future
+                        fill_queue()
+                except BaseException:
+                    # Signal running workers before executor shutdown waits
+                    # for them, and prevent queued work from starting.
+                    event.set()
+                    for future in pending:
+                        future.cancel()
+                    raise
+        finally:
+            self._mint_pool = None
 
         return outcomes
 
     def _skip_outcome(self, planned: PlannedDownload) -> DownloadOutcome:
-        size = planned.dest.stat().st_size if planned.dest.is_file() else 0
+        size = planned.completed_size_bytes
+        if size is None:
+            size = planned.dest.stat().st_size if planned.dest.is_file() else 0
         return DownloadOutcome(
             asset=planned.asset,
             dest=planned.dest,
@@ -784,6 +838,7 @@ class Downloader:
         except _Cancelled:
             return None
         except AuthError:
+            cancel_event.set()
             raise
         except Exception as exc:
             # Any failure becomes a recorded, per-asset outcome rather than

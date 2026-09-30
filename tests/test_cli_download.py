@@ -629,3 +629,16 @@ def test_logging_and_live_display_share_one_console() -> None:
     assert handlers and handlers[0].console is _common.err_console
     assert download_cli._RichProgress()._progress.console is _common.err_console
     assert download_cli._stderr is _common.err_console
+
+
+def test_bulk_skipped_progress_creates_no_tasks(tmp_path: Path) -> None:
+    progress = download_cli._RichProgress(console=Console(file=io.StringIO()))
+    progress.start_run(1, 1000)
+    outcome = DownloadOutcome(
+        _asset(), tmp_path / "tile.tif", DownloadStatus.skipped, 1000, "tile.tif"
+    )
+    progress.on_skipped([outcome] * 90_000)
+    assert len(progress._progress.tasks) == 1
+    assert progress._progress.tasks[0].fields["name"] == "Total (0/1 files)"
+    assert progress._progress.tasks[0].completed == 0
+    assert not progress._task_ids

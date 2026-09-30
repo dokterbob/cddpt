@@ -340,6 +340,12 @@ These resolve the "open items requiring a human" and **change the download desig
 - Destination names derive from item id + media type (`image/tiff*` → `.tif`,
   `application/vnd.laszip` → `.laz`, else `mimetypes`, else `.bin`), so reruns can skip
   completed files without spending tokens; the storage filename is kept in the manifest.
+- Large resumes reuse completed-file sizes from preflight and report skipped files in
+  bulk to the CLI. All skipped outcomes enter the manifest in one atomic snapshot;
+  snapshots serialize one outcome at a time, keeping serialization scratch space bounded.
+  Actual download completions still each rewrite the snapshot. Plans and returned
+  outcomes retain O(files) memory, but outstanding download futures are capped at twice
+  concurrency. Build a fresh plan if destination files change after preflight.
 - **Download tokens are batch-minted, never far ahead of use.** Minting one id at a time made
   minting a full third of a large run's governed requests; a worker's first mint attempt now
   draws from a small thread-safe pool (keyed by `(collection_id, item_id, asset_key)`, sized

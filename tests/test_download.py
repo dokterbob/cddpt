@@ -15,6 +15,10 @@ from __future__ import annotations
 
 import json
 import threading
+import tracemalloc
+from collections.abc import Callable, Sequence
+from concurrent.futures import Future
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,7 +30,13 @@ from shapely.geometry import Point
 
 from cddpt.auth.base import AuthManager, AuthProvider, AuthSession, utcnow
 from cddpt.catalog import CddCatalog
-from cddpt.download import Downloader, DownloadPlan, PlannedDownload, ProgressCallback
+from cddpt.download import (
+    Downloader,
+    DownloadPlan,
+    PlannedDownload,
+    ProgressCallback,
+    _ManifestWriter,
+)
 from cddpt.errors import AuthError, DownloadError, InsufficientDiskSpace
 from cddpt.models import AssetRef, DownloadOutcome, DownloadStatus
 from cddpt.naming import ByCollectionLayout, ByTileLayout, FlatLayout
@@ -1283,3 +1293,227 @@ def test_batch_mint_cancellation_discards_preminted_unused_hrefs(tmp_path: Path)
 def test_download_plan_and_planned_download_are_exported() -> None:
     assert DownloadPlan is not None
     assert PlannedDownload is not None
+
+
+@pytest.mark.parametrize("declared_size", [None, 0, 4])
+def test_skipped_size_is_cached_and_legacy_callbacks_still_fire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared_size: int | None
+) -> None:
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+    progress = _RecordingProgress()
+    downloader = _downloader(
+        catalog=catalog, auth=_simple_auth_manager(), governor=governor, progress=progress
+    )
+    asset = _asset(size_bytes=declared_size)
+    dest = FlatLayout().dest_for(asset, tmp_path)
+    size = 0 if declared_size == 0 else 4
+    dest.write_bytes(b"x" * size)
+    plan = downloader.plan([asset], tmp_path, FlatLayout())
+    assert plan.already_complete[0].completed_size_bytes == size
+
+    def unexpected_stat(*args: object, **kwargs: object) -> None:
+        raise AssertionError("run must reuse the preflight snapshot")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "stat", unexpected_stat)
+        outcomes = downloader.run(plan)
+    assert outcomes[0].bytes_transferred == size
+    assert len(progress.started) == len(progress.done) == 1
+    assert progress.done == outcomes
+
+    # A manually constructed plan has no snapshot and retains the old lookup.
+    legacy = replace(plan.already_complete[0], completed_size_bytes=None)
+    assert downloader._skip_outcome(legacy).bytes_transferred == size
+
+
+def test_manifest_streaming_preserves_snapshot_on_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cddpt.download as module
+
+    path = tmp_path / "manifest.json"
+    outcome = DownloadOutcome(
+        _asset(), tmp_path / "tile.tif", DownloadStatus.skipped, 4, "tile.tif"
+    )
+    writer = _ManifestWriter(path)
+    writer.record_many(iter([outcome, outcome]))
+    previous = path.read_bytes()
+    assert len(json.loads(previous)["outcomes"]) == 2
+    original_dump = module._dump_json
+    calls = 0
+
+    def fail_midway(payload: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("disk full")
+        return original_dump(payload)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_dump_json", fail_midway)
+        with pytest.raises(OSError, match="disk full"):
+            writer.record(outcome)
+    assert path.read_bytes() == previous
+
+    # A subsequent successful snapshot contains the buffered outcomes.
+    writer.record_many(())
+    assert len(json.loads(path.read_text())["outcomes"]) == 3
+
+
+def test_resume_90k_files_has_bounded_serialization_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_property: Callable[[str, object], None]
+) -> None:
+    import cddpt.download as module
+
+    count = 90_000
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+
+    class BulkProgress(_RecordingProgress):
+        skipped = 0
+
+        def on_skipped(self, outcomes: Sequence[DownloadOutcome]) -> None:
+            self.skipped = len(outcomes)
+
+    progress = BulkProgress()
+    downloader = _downloader(
+        catalog=catalog, auth=_simple_auth_manager(), governor=governor, progress=progress
+    )
+    asset = _asset(size_bytes=4)
+    completed = tuple(
+        PlannedDownload(
+            replace(asset, item_id=f"tile-{i}"), tmp_path / f"tile-{i}.tif", f"tile-{i}.tif", 4
+        )
+        for i in range(count)
+    )
+    # Real preflight calls stat(), which materializes pathlib's cached
+    # strings/parts. Warm these before measuring post-preflight allocations.
+    for planned in completed:
+        str(planned.dest)
+    pending = PlannedDownload(asset, tmp_path / "pending.tif", "pending.tif")
+    plan = DownloadPlan(tmp_path, (pending,), completed, 4 * (count + 1), 4, 4 * count, 0, 10**9)
+    path = tmp_path / "manifest.json"
+    replacements = 0
+    original_replace = module.os.replace
+    original_stat = Path.stat
+
+    def record_replace(source: Path, dest: Path) -> None:
+        nonlocal replacements
+        replacements += 1
+        original_replace(source, dest)
+
+    def forbid_tile_stat(path: Path, *args: object, **kwargs: object) -> object:
+        assert path.suffix != ".tif", "completed files must not be statted again"
+        return original_stat(path, *args, **kwargs)
+
+    def worker(*args: object) -> None:
+        assert replacements == 1
+
+    monkeypatch.setattr(module.os, "replace", record_replace)
+    monkeypatch.setattr(Path, "stat", forbid_tile_stat)
+    monkeypatch.setattr(downloader, "_worker", worker)
+    # Exclude retained plan/asset memory; measure outcomes plus serialization.
+    tracemalloc.start()
+    try:
+        outcomes = downloader.run(plan, concurrency=1, manifest_path=path)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    record_property("resume_peak_bytes", peak)
+    assert peak < 24 * 1024 * 1024, f"resume scratch + outcomes peaked at {peak} bytes"
+    assert len(outcomes) == count
+    assert progress.skipped == count
+    assert not progress.started and not progress.done
+    assert replacements == 1
+    with path.open() as stream:
+        records = json.load(stream)["outcomes"]
+    assert len(records) == count
+    assert records[0]["item_id"] == "tile-0"
+    assert records[-1]["item_id"] == f"tile-{count - 1}"
+    assert all(record["status"] == "skipped" for record in records)
+
+
+@responses.activate
+def test_mixed_resume_manifest_keeps_skips_and_new_downloads(tmp_path: Path) -> None:
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+    downloader = _downloader(catalog=catalog, auth=_simple_auth_manager(), governor=governor)
+    skipped = _asset(item_id="existing", size_bytes=None)
+    pending = _asset(item_id="pending", size_bytes=4)
+    FlatLayout().dest_for(skipped, tmp_path).write_bytes(b"present")
+    _register_mint(pending, "tok-pending")
+    _register_exchange_redirect("tok-pending", PRESIGNED_1)
+    responses.add(responses.GET, PRESIGNED_1, status=200, body=b"data")
+    plan = downloader.plan([skipped, pending], tmp_path, FlatLayout())
+    path = tmp_path / "manifest.json"
+    outcomes = downloader.run(plan, manifest_path=path)
+    assert [o.status for o in outcomes] == [DownloadStatus.skipped, DownloadStatus.downloaded]
+    records = json.loads(path.read_text())["outcomes"]
+    assert [(r["item_id"], r["bytes_transferred"]) for r in records] == [
+        ("existing", 7),
+        ("pending", 4),
+    ]
+
+
+@pytest.mark.parametrize("stop", [None, "cancel", "auth", "interrupt"])
+def test_scheduler_bounds_outstanding_work_and_stops_on_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str | None
+) -> None:
+    import cddpt.download as module
+
+    governor = _fast_governor()
+    catalog = CddCatalog(settings=_settings(), governor=governor)
+    downloader = _downloader(catalog=catalog, auth=_simple_auth_manager(), governor=governor)
+    plan = downloader.plan(
+        [_asset(item_id=f"tile-{i}") for i in range(100)], tmp_path, FlatLayout()
+    )
+    event = threading.Event()
+    queued: list[Future[DownloadOutcome | None]] = []
+    submitted = 0
+    peak = 0
+
+    class Executor:
+        def __init__(self, max_workers: int) -> None:
+            assert max_workers == 2
+
+        def __enter__(self) -> Executor:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            if stop in ("auth", "interrupt"):
+                assert event.is_set(), "workers must be signaled before shutdown waits"
+                assert all(f.cancelled() for f in queued)
+
+        def submit(self, *args: object) -> Future[DownloadOutcome | None]:
+            nonlocal submitted, peak
+            future: Future[DownloadOutcome | None] = Future()
+            queued.append(future)
+            submitted += 1
+            peak = max(peak, len(queued))
+            return future
+
+    def complete_one(
+        pending: set[Future[DownloadOutcome | None]], **kwargs: object
+    ) -> tuple[set[Future[DownloadOutcome | None]], set[Future[DownloadOutcome | None]]]:
+        if stop == "interrupt":
+            raise KeyboardInterrupt
+        future = queued.pop(0)
+        if stop == "cancel":
+            event.set()
+        if stop == "auth":
+            future.set_exception(AuthError("expired"))
+        else:
+            future.set_result(None)
+        return {future}, pending - {future}
+
+    monkeypatch.setattr(module, "ThreadPoolExecutor", Executor)
+    monkeypatch.setattr(module, "wait", complete_one)
+    if stop in ("auth", "interrupt"):
+        error = AuthError if stop == "auth" else KeyboardInterrupt
+        with pytest.raises(error):
+            downloader.run(plan, concurrency=2, cancel_event=event)
+    else:
+        assert downloader.run(plan, concurrency=2, cancel_event=event) == []
+    assert peak == 4
+    assert submitted == (100 if stop is None else 4)
